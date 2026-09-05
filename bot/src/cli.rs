@@ -9,11 +9,11 @@ use clap::{Parser, Subcommand};
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::{collections::HashSet, path::PathBuf, process::Stdio, sync::Arc};
-use teloxide::{Bot, types::UserId};
+use teloxide::{Bot, types::{BotCommand, UserId}};
 use teloxide::{dispatching::dialogue::InMemStorage, prelude::*};
 use tokio::fs;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use walkdir::WalkDir;
 
 #[derive(Parser)]
@@ -168,6 +168,20 @@ impl Cli {
                 if let Some(url) = local_server_url {
                     bot = bot.set_api_url(url.parse().context("Failed to parse local server url")?);
                 }
+                // register the command menu visible in TG clients
+                {
+                    let commands = vec![
+                        BotCommand::new("start", "Start the bot"),
+                        BotCommand::new("help", "Show all commands"),
+                        BotCommand::new("state", "Show current state"),
+                        BotCommand::new("toggle", "Switch paused/active state, renew to rotate key"),
+                        BotCommand::new("bypasskey", "Print bypass key"),
+                    ];
+                    match bot.set_my_commands(commands).await {
+                        Ok(_) => info!(">> INIT: command menu registered"),
+                        Err(e) => warn!(">> INIT: failed to register command menu: {}", e),
+                    }
+                }
                 let storage = MyStorage::new(
                     format!("sqlite://{}/data.db?mode=rwc", context.db_dir.display()),
                     bot.clone(), // used to download files
@@ -236,6 +250,20 @@ impl Cli {
                 let mut bot = Bot::from_env();
                 if let Some(url) = local_server_url {
                     bot = bot.set_api_url(url.parse().context("Failed to parse local server url")?);
+                }
+                // register the command menu visible in TG clients
+                {
+                    let commands = vec![
+                        BotCommand::new("start", "Start the bot"),
+                        BotCommand::new("help", "Show all commands"),
+                        BotCommand::new("state", "Show current state"),
+                        BotCommand::new("toggle", "Switch paused/active state, renew to rotate key"),
+                        BotCommand::new("bypasskey", "Print bypass key"),
+                    ];
+                    match bot.set_my_commands(commands).await {
+                        Ok(_) => info!(">> INIT: command menu registered"),
+                        Err(e) => warn!(">> INIT: failed to register command menu: {}", e),
+                    }
                 }
                 let storage = MyStorage::new(
                     format!("sqlite://{}/data.db?mode=rwc", context.db_dir.display()),
