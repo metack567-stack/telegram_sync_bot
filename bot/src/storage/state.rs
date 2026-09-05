@@ -1,4 +1,5 @@
 use core::fmt;
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ChatState {
@@ -25,7 +26,10 @@ impl<S: AsRef<str>> From<S> for ChatState {
             "Paused" => ChatState::Paused,
             "Active" => ChatState::Active,
             "PartiallyActive" => ChatState::PartiallyActive,
-            _ => panic!("Unknown chat state: {}", s.as_ref()),
+            _ => {
+                warn!("Unknown chat state: {}, fallback to default", s.as_ref());
+                Self::default()
+            }
         }
     }
 }
@@ -60,7 +64,10 @@ impl<S: AsRef<str>> From<S> for TransportState {
             "Completed" => TransportState::Completed,
             "Cancelled" => TransportState::Cancelled,
             "Failed" => TransportState::Failed,
-            _ => panic!("Unknown download state: {}", s.as_ref()),
+            _ => {
+                warn!("Unknown download state: {}, fallback to default", s.as_ref());
+                Self::default()
+            }
         }
     }
 }
@@ -92,7 +99,10 @@ impl<S: AsRef<str>> From<S> for FileState {
             "Normal" => FileState::Normal,
             "Fav" => FileState::Fav,
             "Trash" => FileState::Trash,
-            _ => panic!("Unknown file state: {}", s.as_ref()),
+            _ => {
+                warn!("Unknown file state: {}, fallback to default", s.as_ref());
+                Self::default()
+            }
         }
     }
 }

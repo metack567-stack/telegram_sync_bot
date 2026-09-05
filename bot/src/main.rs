@@ -17,7 +17,7 @@ async fn main() {
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(std::io::stdout)
-                .without_time()
+                .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
                 .with_target(false),
         )
         .with(filter)

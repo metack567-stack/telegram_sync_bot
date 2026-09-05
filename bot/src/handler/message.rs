@@ -30,7 +30,7 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
     let (chat_id, mut msg_id) = (msg.chat.id, msg.id);
     let chat_state = storage.get_chat_state(chat_id).await?;
     if chat_state == ChatState::Paused {
-        bot.send_message(chat_id, "Sync paused").await?;
+        // silently ignore while paused, avoid replying to every message
         dialogue.exit().await?;
         return Ok(());
     }

@@ -18,7 +18,7 @@ anyhow = { version = "1.0.86" }
 teloxide = { version = "0.13", features = ["macros"] }
 # tracing
 tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 # runtime
 tokio = { version = "1.8", features = [
     "rt-multi-thread",
@@ -43,6 +43,8 @@ sea-orm-migration = { version = "1.1.0", features = [
 parking_lot = { version = "0.12.3" }
 # fs
 walkdir = { version = "2.5.0" }
+# fs
+libc = { version = "0.2" }
 
 [features]
 default = []

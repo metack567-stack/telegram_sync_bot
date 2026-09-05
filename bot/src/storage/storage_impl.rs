@@ -14,6 +14,7 @@ pub struct MyStorage {
     db: Db,
     downloader: Arc<Downloader>,
     context: Context,
+    file_name_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl MyStorage {
@@ -24,6 +25,7 @@ impl MyStorage {
             db,
             downloader,
             context,
+            file_name_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 }
@@ -82,10 +84,33 @@ impl MyStorage {
                 let origin = self.context.data_dir.join(&file_name);
                 let db = self.db.clone();
                 tokio::spawn(async move {
-                    for _ in 0..32768 {
-                        // waiting at most 27 hours or so, maybe is still downloading
+                    // wait until the flat-layer file appears (download finished) or
+                    // the download task reaches a terminal state (failed/cancelled),
+                    // whichever comes first. The safety cap below only guards against
+                    // a stuck DB state and is far above any realistic download time.
+                    let file_id = match db
+                        .get_file_id_by_handle((handle.0.0, handle.1.0))
+                        .await
+                    {
+                        Ok(Some(fid)) => fid,
+                        _ => {
+                            // handle record missing (message deleted / task cancelled)
+                            // or db error: waiting is pointless
+                            return Err(anyhow!(
+                                "no handle record, skip classification for {}",
+                                file_name
+                            ));
+                        }
+                    };
+                    for _ in 0..14400 {
+                        // at most ~12 hours, only reached if the DB state never updates
                         if fs::try_exists(&origin).await? {
-                            fs::hard_link(origin, &to).await?;
+                            fs::hard_link(&origin, &to).await?;
+                            // remove the flat-layer hard link, keep only the one in the
+                            // classified directory to avoid duplicate entries
+                            if origin != to {
+                                fs::remove_file(origin).await.ok();
+                            }
                             if from != to {
                                 fs::remove_file(from).await.ok();
                             }
@@ -95,6 +120,17 @@ impl MyStorage {
                             )
                             .await?;
                             return Ok::<_, anyhow::Error>(());
+                        }
+                        // give up as soon as the download failed or was cancelled:
+                        // the file will never appear, waiting would be pointless
+                        if matches!(
+                            db.get_transport_state(file_id.clone()).await,
+                            Ok(TransportState::Failed) | Ok(TransportState::Cancelled)
+                        ) {
+                            return Err(anyhow!(
+                                "download failed or cancelled, skip classification for {}",
+                                file_name
+                            ));
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     }
@@ -159,11 +195,22 @@ impl MyStorage {
             info!(">> Storage: already finished");
             return Ok(None);
         }
-        self.db
-            .set_file_name(file_id.clone(), file_name.clone())
-            .await?;
-        let handle = self.downloader.add(file_id.clone(), file_name);
+        // assign a unique file name: if another file_id already holds this name,
+        // append `_1`, `_2` ... so files never overwrite each other
+        let final_name = {
+            let _guard = self.file_name_lock.lock().await;
+            let mut name = file_name;
+            if self.db.file_name_taken(&file_id, &name).await? {
+                name = self.unique_file_name(&file_id, &name).await?;
+            }
+            self.db
+                .set_file_name(file_id.clone(), name.clone())
+                .await?;
+            name
+        };
+        let handle = self.downloader.add(file_id.clone(), final_name);
         let db = self.db.clone();
+        let downloader_c = self.downloader.clone();
         let handle_c = handle.clone();
         tokio::spawn(async move {
             while TransportState::Pending == handle_c.get_state() {
@@ -175,11 +222,36 @@ impl MyStorage {
                     .await?;
             }
 
-            db.set_transport_state(file_id, handle_c.result().await)
+            db.set_transport_state(file_id.clone(), handle_c.result().await)
                 .await?;
+            // drop the finished handle so the map does not grow forever
+            downloader_c.remove(&file_id, &handle_c);
             Ok::<_, anyhow::Error>(())
         });
         Ok(Some(handle))
+    }
+
+    /// find a free file name like `stem_1.ext`, `stem_2.ext` ... when `base` is taken
+    async fn unique_file_name(&self, file_id: &str, base: &str) -> Result<String> {
+        let (stem, ext) = match base.rsplit_once('.') {
+            Some((s, e)) if !e.is_empty() => (s.to_string(), format!(".{}", e)),
+            _ => (base.to_string(), String::new()),
+        };
+        for i in 1..=9999 {
+            let candidate = format!("{}_{}{}", stem, i, ext);
+            let taken = self.db.file_name_taken(file_id, &candidate).await?;
+            let exists = tokio::fs::try_exists(self.context.data_dir.join(&candidate))
+                .await
+                .unwrap_or(false);
+            if !taken && !exists {
+                return Ok(candidate);
+            }
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Ok(format!("{}_{}{}", stem, ts, ext))
     }
 
     /// cancel a download task

@@ -7,8 +7,8 @@ WORKDIR /work
 
 COPY . .
 
-RUN cargo fetch
-RUN cargo build --release
+RUN --mount=type=cache,target=/usr/local/cargo/registry cargo fetch
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/work/target cargo build --release && cp /work/target/release/telegram_sync_bot /work/telegram_sync_bot
 
 ########################################
 
@@ -17,9 +17,9 @@ FROM docker.io/alpine:latest AS bot
 WORKDIR /app
 
 RUN apk update \
-    && apk add --no-cache --purge bash
+    && apk add --no-cache --purge bash tzdata
 
-COPY --from=bot_builder /work/target/release/telegram_sync_bot /app
+COPY --from=bot_builder /work/telegram_sync_bot /app
 
 STOPSIGNAL SIGINT
 

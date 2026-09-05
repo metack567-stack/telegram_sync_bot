@@ -91,6 +91,20 @@ impl Db {
         Ok(())
     }
 
+    /// whether another file_id already uses this file_name
+    pub(super) async fn file_name_taken(
+        &self,
+        file_id: &str,
+        file_name: &str,
+    ) -> Result<bool> {
+        let n = file_state::Entity::find()
+            .filter(file_state::Column::FileName.eq(file_name))
+            .filter(file_state::Column::FileId.ne(file_id))
+            .count(&self.db)
+            .await?;
+        Ok(n > 0)
+    }
+
     pub(super) async fn get_transport_state(&self, file_id: String) -> Result<TransportState> {
         match file_state::Entity::find_by_id(file_id)
             .one(&self.db)
@@ -270,7 +284,7 @@ impl Db {
     pub(super) async fn delete_file_record(&self, file_id: String) -> Result<()> {
         let txn = self.db.begin().await?;
         file_handle::Entity::delete_many()
-            .filter(file_state::Column::FileId.eq(file_id.to_owned()))
+            .filter(file_handle::Column::FileId.eq(file_id.to_owned()))
             .exec(&txn)
             .await?;
         file_state::Entity::delete_by_id(file_id.to_owned())

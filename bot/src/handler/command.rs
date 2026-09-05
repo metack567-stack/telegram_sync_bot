@@ -49,10 +49,16 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                 Ok(())
             }),
         )
-        .branch(case![Command::BypassKey].endpoint(async |ctx: Context| {
-            info!(">> BOT: BypassKey: /toggle {}", ctx.bypasskey.read());
-            Ok(())
-        }))
+        .branch(case![Command::BypassKey].endpoint(
+            async |bot: Bot, dialogue: MyDialogue, msg: Message, ctx: Context| {
+                if !auth(&bot, &dialogue, &msg, &ctx).await? {
+                    info!(">> BOT: auth not pass");
+                    return Ok(());
+                }
+                info!(">> BOT: BypassKey: /toggle {}", ctx.bypasskey.read());
+                Ok(())
+            },
+        ))
         .branch(
             case![Command::State].endpoint(async |bot: Bot, msg: Message, db: MyStorage| {
                 let state = db.get_chat_state(msg.chat.id).await?;
@@ -96,6 +102,7 @@ async fn auth(bot: &Bot, dialogue: &MyDialogue, msg: &Message, ctx: &Context) ->
                 // renew bypass_pwd
                 let new = gen_key();
                 info!(">> BOT: New bypasskey: {}", new);
+                crate::utils::save_key(&ctx.data_dir, &new);
                 *ctx.bypasskey.write() = new;
                 Ok(true)
             }

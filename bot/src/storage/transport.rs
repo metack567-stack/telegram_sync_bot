@@ -78,6 +78,14 @@ impl Downloader {
                 .unwrap()
                 .block_on(async move {
                     let cancels = Arc::new(RwLock::new(HashMap::new()));
+                    // limit how many files are downloaded at the same time
+                    // (env DOWNLOAD_CONCURRENCY, default 3, range 1..=10)
+                    let concurrency = std::env::var("DOWNLOAD_CONCURRENCY")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .filter(|n| (1..=10).contains(n))
+                        .unwrap_or(3);
+                    let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
                     while let Ok(msg) = rx.recv() {
                         match msg {
                             Message::Add(file_id, file_name, handle) => {
@@ -92,14 +100,41 @@ impl Downloader {
                                     file_id: FileId,
                                     file_name: FileName,
                                     context: Context,
-                                    handle: TransportHandle
+                                    handle: TransportHandle,
+                                    sem: Arc<tokio::sync::Semaphore>
                                 ) -> Result<()> {
+                                    // wait for a free slot before starting the download
+                                    let _permit = sem.acquire().await?;
                                     info!(">> DOWNLOADER: start task {}", file_id);
                                     handle.set_state(TransportState::Downloading);
                                     let save_path = context.data_dir.join(file_name);
+                                    // retry get_file for at most ~60s, then give up instead of looping forever
+                                    let mut attempts = 0u32;
                                     let server_path = loop {
                                         if let Ok(f) = bot.get_file(&file_id).send().await {
+                                            // check free space before downloading, fail
+                                            // fast instead of filling the disk
+                                            if f.size > 0 {
+                                                let avail =
+                                                    crate::utils::available_bytes(&context.data_dir)?;
+                                                if f.size as u64 > avail {
+                                                    return Err(anyhow::anyhow!(
+                                                        "not enough disk space: need {} bytes, only {} available for {}",
+                                                        f.size,
+                                                        avail,
+                                                        file_id
+                                                    ));
+                                                }
+                                            }
                                             break PathBuf::from(f.path);
+                                        }
+                                        attempts += 1;
+                                        if attempts >= 20 {
+                                            return Err(anyhow::anyhow!(
+                                                "failed to get file path for {} after {} attempts",
+                                                file_id,
+                                                attempts
+                                            ));
                                         }
                                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     };
@@ -118,8 +153,8 @@ impl Downloader {
                                                 cp_from_container(
                                                     container_manager,
                                                     context.container_id.as_ref().unwrap(),
-                                                    server_path,
-                                                    save_path,
+                                                    &server_path,
+                                                    &save_path,
                                                 )
                                                 .await?;
                                             }
@@ -128,21 +163,75 @@ impl Downloader {
                                                     if fs::hard_link(&server_path,  &save_path).await.is_err() {
                                                         context.hard_link.store(false, Ordering::Relaxed);
                                                         info!(">> DOWNLOADER: file in local server cannot hard link to output, use copy instead");
-                                                        fs::copy(server_path, &save_path).await?;
+                                                        fs::copy(&server_path, &save_path).await?;
                                                     }
                                                 } else {
-                                                    fs::copy(server_path, &save_path).await?;
+                                                    fs::copy(&server_path, &save_path).await?;
                                                 }
                                             }
                                         },
                                     }
                                     info!(">> DOWNLOADER: finish task {}", file_id);
+                                    if context.local_server {
+                                        // remove the file from the local telegram-bot-api cache,
+                                        // the bot already holds a hard link or a copy
+                                        if let Err(e) = fs::remove_file(&server_path).await {
+                                            warn!(
+                                                ">> DOWNLOADER: failed to remove server cache {}: {}",
+                                                server_path.display(),
+                                                e
+                                            );
+                                        }
+                                    }
                                     Ok(())
                                 }
+                                async fn download_with_retry(
+                                    bot: Bot,
+                                    file_id: FileId,
+                                    file_name: FileName,
+                                    context: Context,
+                                    handle: TransportHandle,
+                                    sem: Arc<tokio::sync::Semaphore>,
+                                ) -> Result<()> {
+                                    let mut attempt = 0u32;
+                                    loop {
+                                        match download(
+                                            bot.clone(),
+                                            file_id.clone(),
+                                            file_name.clone(),
+                                            context.clone(),
+                                            handle.clone(),
+                                            sem.clone(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => return Ok(()),
+                                            Err(e) => {
+                                                attempt += 1;
+                                                if attempt >= 3 {
+                                                    return Err(e);
+                                                }
+                                                warn!(
+                                                    ">> DOWNLOADER: download failed, retry {}: {}",
+                                                    attempt + 1,
+                                                    e
+                                                );
+                                                tokio::time::sleep(std::time::Duration::from_secs(
+                                                    5 * attempt as u64,
+                                                ))
+                                                .await;
+                                                if handle.cancel.is_cancelled() {
+                                                    return Err(anyhow::anyhow!("cancelled"));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 let cancels_c = cancels.clone();
+                                let sem_c = sem.clone();
                                 tokio::spawn(async move {
                                     tokio::select! {
-                                        res = download(bot, file_id.clone(), file_name, context, handle.clone()) => {
+                                        res = download_with_retry(bot, file_id.clone(), file_name.clone(), context.clone(), handle.clone(), sem_c) => {
                                             match res {
                                                 Ok(_) => handle.set_state(TransportState::Completed),
                                                 Err(e) => {
@@ -155,6 +244,8 @@ impl Downloader {
                                         _ = handle.cancel.cancelled() => {
                                             info!(">> DOWNLOADER: task cancelled {}", file_id);
                                             handle.set_state(TransportState::Cancelled);
+                                            // remove the partial file a cancelled download may have left behind
+                                            let _ = fs::remove_file(context.data_dir.join(&file_name)).await;
                                         },
                                     };
                                     cancels_c.write().remove(&file_id);
@@ -206,9 +297,12 @@ impl Downloader {
             _ => {
                 drop(read);
                 let handle = TransportHandle::new();
-                self.tx
+                if let Err(e) = self
+                    .tx
                     .send(Message::Add(file_id.clone(), file_name, handle.clone()))
-                    .unwrap();
+                {
+                    warn!(">> DOWNLOADER: failed to submit task: {}", e);
+                }
                 if let Some(old_handle) = self.downloads.write().insert(file_id, handle.clone()) {
                     old_handle.cancel();
                 }
@@ -218,7 +312,19 @@ impl Downloader {
     }
 
     pub(super) fn cancel(&self, file_id: FileId) {
-        self.tx.send(Message::Cancel(file_id)).unwrap();
+        if let Err(e) = self.tx.send(Message::Cancel(file_id)) {
+            warn!(">> DOWNLOADER: failed to send cancel: {}", e);
+        }
+    }
+
+    /// remove a finished handle from the map, only if it is still the same handle
+    pub(super) fn remove(&self, file_id: &str, handle: &TransportHandle) {
+        let mut w = self.downloads.write();
+        if let Some(h) = w.get(file_id) {
+            if std::sync::Arc::ptr_eq(&h.state, &handle.state) {
+                w.remove(file_id);
+            }
+        }
     }
 
     fn shutdown(&self) {

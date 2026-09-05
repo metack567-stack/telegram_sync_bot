@@ -122,7 +122,7 @@ impl Cli {
                             container_manager
                         },
                         container_id,
-                        bypasskey: RwLock::new(gen_key()),
+                        bypasskey: RwLock::new(crate::utils::load_or_create_key(&output)),
                         bypass_users: {
                             match std::env::var("BYPASS_USERS") {
                                 Ok(bypass_users) if !bypass_users.is_empty() => {

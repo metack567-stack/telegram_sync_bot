@@ -37,7 +37,7 @@ async fn reaction_handle(
     let chat_id = dialogue.chat_id();
     tracing::Span::current().record("chat_id", chat_id.0);
     if matches!(storage.get_chat_state(chat_id).await?, ChatState::Paused) {
-        bot.send_message(chat_id, "React paused").await?;
+        // silently ignore while paused, avoid replying to every reaction
         dialogue.exit().await?;
         return Ok(());
     }
@@ -105,7 +105,7 @@ async fn reaction_count_handle(
     let chat_id = dialogue.chat_id();
     tracing::Span::current().record("chat_id", chat_id.0);
     if matches!(storage.get_chat_state(chat_id).await?, ChatState::Paused) {
-        bot.send_message(chat_id, "React paused").await?;
+        // silently ignore while paused, avoid replying to every reaction
         dialogue.exit().await?;
         return Ok(());
     }
@@ -138,6 +138,13 @@ async fn reaction_count_handle(
                 .sum();
 
             tracing::Span::current().record("score", score);
+            // an explicit fav already locked this file; scoring must not override it
+            if !matches!(
+                storage.get_file_state_by_handle((chat_id, msg_id)).await?,
+                FileState::Normal
+            ) {
+                return Ok(());
+            }
             if score >= ctx.fav_score_limit {
                 storage
                     .set_file_state_by_handle_and_link((chat_id, msg_id), FileState::Fav)
