@@ -108,35 +108,80 @@ impl Downloader {
                                     info!(">> DOWNLOADER: start task {}", file_id);
                                     handle.set_state(TransportState::Downloading);
                                     let save_path = context.data_dir.join(file_name);
-                                    // retry get_file for at most ~60s, then give up instead of looping forever
+                                    // Waiting for get_file can take a long time: the local server
+                                    // must pull large files from Telegram first (2.5GB+ can take
+                                    // 20-60 minutes on a slow link). Wait up to
+                                    // GETFILE_TIMEOUT_MIN (default 120) instead of a fixed number
+                                    // of attempts; abort immediately on user cancel.
+                                    let timeout_min = std::env::var("GETFILE_TIMEOUT_MIN")
+                                        .ok()
+                                        .and_then(|v| v.parse::<u64>().ok())
+                                        .unwrap_or(120);
+                                    let deadline = std::time::Instant::now()
+                                        .checked_add(std::time::Duration::from_secs(
+                                            timeout_min.saturating_mul(60),
+                                        ))
+                                        .unwrap_or_else(std::time::Instant::now);
                                     let mut attempts = 0u32;
                                     let server_path = loop {
-                                        if let Ok(f) = bot.get_file(&file_id).send().await {
-                                            // check free space before downloading, fail
-                                            // fast instead of filling the disk
-                                            if f.size > 0 {
-                                                let avail =
-                                                    crate::utils::available_bytes(&context.data_dir)?;
-                                                if f.size as u64 > avail {
+                                        match bot.get_file(&file_id).send().await {
+                                            Ok(f) => {
+                                                // check free space before downloading, fail
+                                                // fast instead of filling the disk
+                                                if f.size > 0 {
+                                                    let avail =
+                                                        crate::utils::available_bytes(&context.data_dir)?;
+                                                    if f.size as u64 > avail {
+                                                        return Err(anyhow::anyhow!(
+                                                            "not enough disk space: need {} bytes, only {} available for {}",
+                                                            f.size,
+                                                            avail,
+                                                            file_id
+                                                        ));
+                                                    }
+                                                }
+                                                break PathBuf::from(f.path);
+                                            }
+                                            Err(e) => {
+                                                attempts += 1;
+                                                if attempts == 1 || attempts % 20 == 0 {
+                                                    warn!(
+                                                        ">> DOWNLOADER: get_file attempt {} failed for {}: {}",
+                                                        attempts,
+                                                        file_id,
+                                                        e
+                                                    );
+                                                }
+                                                if handle.cancel.is_cancelled() {
+                                                    return Err(anyhow::anyhow!("cancelled"));
+                                                }
+                                                // distinguish \"still downloading\" from \"failed\":
+                                                // the local server writes its cache (temp/videos/...)
+                                                // while pulling from Telegram, so if files there are
+                                                // being modified keep waiting; if there has been no
+                                                // server-side activity for 10 attempts the file is
+                                                // not coming, fail fast instead of waiting out the
+                                                // whole deadline.
+                                                let active =
+                                                    server_download_active(Some(&context.server_cache_dir));
+                                                if active {
+                                                    if std::time::Instant::now() >= deadline {
+                                                        return Err(anyhow::anyhow!(
+                                                            "failed to get file path for {} after {} minutes",
+                                                            file_id,
+                                                            timeout_min
+                                                        ));
+                                                    }
+                                                } else if attempts >= 10 {
                                                     return Err(anyhow::anyhow!(
-                                                        "not enough disk space: need {} bytes, only {} available for {}",
-                                                        f.size,
-                                                        avail,
+                                                        "no server download activity for {} attempts while waiting for {}",
+                                                        attempts,
                                                         file_id
                                                     ));
                                                 }
+                                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                             }
-                                            break PathBuf::from(f.path);
                                         }
-                                        attempts += 1;
-                                        if attempts >= 20 {
-                                            return Err(anyhow::anyhow!(
-                                                "failed to get file path for {} after {} attempts",
-                                                file_id,
-                                                attempts
-                                            ));
-                                        }
-                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     };
                                     // path of the file inside the local telegram-bot-api
                                     // cache: it may already be absolute (server container
@@ -341,6 +386,38 @@ impl Downloader {
             jh.join().unwrap();
         }
     }
+}
+
+/// True if the local telegram-bot-api server is currently writing files
+/// into its cache (any file under temp/videos/documents/photos modified in
+/// the last 60 seconds). Lets the downloader tell \"still downloading\"
+/// from \"download failed\".
+fn server_download_active(cache_dir: Option<&std::path::Path>) -> bool {
+    let Some(dir) = cache_dir else { return false; };
+    let Ok(entries) = std::fs::read_dir(dir) else { return false; };
+    for e in entries.flatten() {
+        let Ok(ft) = e.file_type() else { continue; };
+        if !ft.is_dir() {
+            continue;
+        }
+        for sub in ["temp", "videos", "documents", "photos"] {
+            let Ok(files) = std::fs::read_dir(e.path().join(sub)) else { continue; };
+            for f in files.flatten() {
+                let Ok(md) = f.metadata() else { continue; };
+                if !md.is_file() || md.len() == 0 {
+                    continue;
+                }
+                if let Ok(modified) = md.modified() {
+                    if let Ok(elapsed) = modified.elapsed() {
+                        if elapsed.as_secs() < 60 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 impl Drop for Downloader {
