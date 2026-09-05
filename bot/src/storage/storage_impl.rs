@@ -7,7 +7,7 @@ use std::sync::Arc;
 use teloxide::Bot;
 use teloxide::types::{ChatId, MessageId};
 use tokio::fs;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 #[derive(Debug, Clone)]
 pub struct MyStorage {
@@ -263,5 +263,64 @@ impl MyStorage {
             }
             None => Err(anyhow!("No such handle")),
         }
+    }
+
+    /// delete trash files older than `retention_days`, together with their DB records.
+    /// Returns the number of files removed.
+    pub async fn cleanup_trash(&self, retention_days: u64) -> Result<u32> {
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(
+                retention_days.saturating_mul(24 * 3600),
+            ))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let mut removed = 0u32;
+        let base = self.context.data_dir.clone();
+        let mut chats = tokio::fs::read_dir(&base).await?;
+        while let Some(chat) = chats.next_entry().await? {
+            if !chat.file_type().await?.is_dir() {
+                continue;
+            }
+            let trash = chat.path().join("trash");
+            if !tokio::fs::try_exists(&trash).await? {
+                continue;
+            }
+            let mut files = tokio::fs::read_dir(&trash).await?;
+            while let Some(entry) = files.next_entry().await? {
+                if !entry.file_type().await?.is_file() {
+                    continue;
+                }
+                let modified = entry
+                    .metadata()
+                    .await?
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                if modified > cutoff {
+                    continue;
+                }
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                // drop the DB records for this file name, they are no longer valid
+                for file_id in self.db.get_file_ids_by_name(file_name.clone()).await? {
+                    self.db.delete_file_record(file_id).await.ok();
+                }
+                match tokio::fs::remove_file(entry.path()).await {
+                    Ok(_) => {
+                        removed += 1;
+                        info!(
+                            ">> CLEANER: removed expired trash file {}",
+                            entry.path().display()
+                        );
+                    }
+                    Err(e) => warn!(
+                        ">> CLEANER: failed to remove {}: {}",
+                        entry.path().display(),
+                        e
+                    ),
+                }
+            }
+        }
+        if removed > 0 {
+            info!(">> CLEANER: cleaned {} expired trash file(s)", removed);
+        }
+        Ok(removed)
     }
 }

@@ -122,7 +122,22 @@ impl Cli {
                             container_manager
                         },
                         container_id,
-                        bypasskey: RwLock::new(crate::utils::load_or_create_key(&output)),
+                        // where data.db and bypass.key live (env DB_DIR)
+                        db_dir: {
+                            let db_dir = std::env::var("DB_DIR")
+                                .map(std::path::PathBuf::from)
+                                .unwrap_or_else(|_| output.clone());
+                            std::fs::create_dir_all(&db_dir)?;
+                            db_dir
+                        },
+                        server_cache_dir: std::env::var("SERVER_CACHE_DIR")
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|_| output.clone()),
+                        bypasskey: RwLock::new(crate::utils::load_or_create_key(
+                            &std::env::var("DB_DIR")
+                                .map(std::path::PathBuf::from)
+                                .unwrap_or_else(|_| output.clone()),
+                        )),
                         bypass_users: {
                             match std::env::var("BYPASS_USERS") {
                                 Ok(bypass_users) if !bypass_users.is_empty() => {
@@ -154,11 +169,32 @@ impl Cli {
                     bot = bot.set_api_url(url.parse().context("Failed to parse local server url")?);
                 }
                 let storage = MyStorage::new(
-                    format!("sqlite://{}/data.db?mode=rwc", context.data_dir.display()),
+                    format!("sqlite://{}/data.db?mode=rwc", context.db_dir.display()),
                     bot.clone(), // used to download files
                     context.clone(),
                 )
                 .await?;
+                // background trash cleaner: remove trash files older than
+                // TRASH_RETENTION_DAYS (default 7), checked every hour
+                {
+                    let storage = storage.clone();
+                    let retention = std::env::var("TRASH_RETENTION_DAYS")
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(7);
+                    info!(
+                        ">> INIT: trash cleaner enabled, retention {} day(s), check every 1h",
+                        retention
+                    );
+                    tokio::spawn(async move {
+                        loop {
+                            if let Err(e) = storage.cleanup_trash(retention).await {
+                                error!(">> CLEANER: {}", e);
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                        }
+                    });
+                }
                 let mut dispatcher = Dispatcher::builder(bot, handler())
                     .dependencies(dptree::deps![InMemStorage::<()>::new(), context, storage])
                     .build();
@@ -185,6 +221,8 @@ impl Cli {
                         container_id: None,
                         bypasskey: RwLock::new(gen_key()),
                         bypass_users: None,
+                        db_dir: output.clone(),
+                        server_cache_dir: output.clone(),
                         data_dir: {
                             std::fs::create_dir_all(&output)?;
                             output
@@ -200,7 +238,7 @@ impl Cli {
                     bot = bot.set_api_url(url.parse().context("Failed to parse local server url")?);
                 }
                 let storage = MyStorage::new(
-                    format!("sqlite://{}/data.db?mode=rwc", context.data_dir.display()),
+                    format!("sqlite://{}/data.db?mode=rwc", context.db_dir.display()),
                     bot.clone(), // used to download files
                     context.clone(),
                 )

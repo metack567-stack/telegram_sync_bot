@@ -138,6 +138,14 @@ impl Downloader {
                                         }
                                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     };
+                                    // path of the file inside the local telegram-bot-api
+                                    // cache: it may already be absolute (server container
+                                    // view) or relative to the server cache root
+                                    let server_abs = if server_path.is_absolute() {
+                                        server_path.clone()
+                                    } else {
+                                        context.server_cache_dir.join(&server_path)
+                                    };
                                     // download file
                                     match context.local_server {
                                         false => {
@@ -160,13 +168,13 @@ impl Downloader {
                                             }
                                             None => {
                                                 if context.hard_link.load(Ordering::Relaxed) {
-                                                    if fs::hard_link(&server_path,  &save_path).await.is_err() {
+                                                    if fs::hard_link(&server_abs,  &save_path).await.is_err() {
                                                         context.hard_link.store(false, Ordering::Relaxed);
                                                         info!(">> DOWNLOADER: file in local server cannot hard link to output, use copy instead");
-                                                        fs::copy(&server_path, &save_path).await?;
+                                                        fs::copy(&server_abs, &save_path).await?;
                                                     }
                                                 } else {
-                                                    fs::copy(&server_path, &save_path).await?;
+                                                    fs::copy(&server_abs, &save_path).await?;
                                                 }
                                             }
                                         },
@@ -175,7 +183,7 @@ impl Downloader {
                                     if context.local_server {
                                         // remove the file from the local telegram-bot-api cache,
                                         // the bot already holds a hard link or a copy
-                                        if let Err(e) = fs::remove_file(&server_path).await {
+                                        if let Err(e) = fs::remove_file(&server_abs).await {
                                             warn!(
                                                 ">> DOWNLOADER: failed to remove server cache {}: {}",
                                                 server_path.display(),

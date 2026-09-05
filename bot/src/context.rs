@@ -25,6 +25,10 @@ pub struct ContextInner {
     pub dislike_score_limit: i32,
 
     pub data_dir: PathBuf,
+    // where data.db and bypass.key live (env DB_DIR)
+    pub db_dir: PathBuf,
+    // root of the local telegram-bot-api cache, seen from this container (env SERVER_CACHE_DIR)
+    pub server_cache_dir: PathBuf,
 
     pub hard_link: AtomicBool,
 }
@@ -40,6 +44,8 @@ impl fmt::Display for Context {
             .field("fav", &format!("score >= {}", self.fav_score_limit))
             .field("delete", &format!("score < {}", self.dislike_score_limit))
             .field("output_dir", &self.data_dir.canonicalize().ok())
+            .field("db_dir", &self.db_dir.canonicalize().ok())
+            .field("server_cache_dir", &self.server_cache_dir.canonicalize().ok())
             .finish()
     }
 }
