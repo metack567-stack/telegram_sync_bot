@@ -108,20 +108,14 @@ impl Downloader {
                                     info!(">> DOWNLOADER: start task {}", file_id);
                                     handle.set_state(TransportState::Downloading);
                                     let save_path = context.data_dir.join(file_name);
-                                    // Waiting for get_file can take a long time: the local server
-                                    // must pull large files from Telegram first (2.5GB+ can take
-                                    // 20-60 minutes on a slow link). Wait up to
-                                    // GETFILE_TIMEOUT_MIN (default 120) instead of a fixed number
-                                    // of attempts; abort immediately on user cancel.
-                                    let timeout_min = std::env::var("GETFILE_TIMEOUT_MIN")
-                                        .ok()
-                                        .and_then(|v| v.parse::<u64>().ok())
-                                        .unwrap_or(120);
-                                    let deadline = std::time::Instant::now()
-                                        .checked_add(std::time::Duration::from_secs(
-                                            timeout_min.saturating_mul(60),
-                                        ))
-                                        .unwrap_or_else(std::time::Instant::now);
+                                    // Waiting for get_file can take arbitrarily long: the local
+                                    // server must pull large files from Telegram first, and on a
+                                    // slow link that can take an hour or more. There is no time
+                                    // cap: keep waiting as long as the server is actively
+                                    // downloading (its cache files keep changing). Give up only
+                                    // when the user cancels, or when there has been no server-side
+                                    // download activity for 10 attempts (~1 minute) - that is a
+                                    // real failure, not a slow download.
                                     let mut attempts = 0u32;
                                     let server_path = loop {
                                         match bot.get_file(&file_id).send().await {
@@ -158,21 +152,12 @@ impl Downloader {
                                                 // distinguish \"still downloading\" from \"failed\":
                                                 // the local server writes its cache (temp/videos/...)
                                                 // while pulling from Telegram, so if files there are
-                                                // being modified keep waiting; if there has been no
-                                                // server-side activity for 10 attempts the file is
-                                                // not coming, fail fast instead of waiting out the
-                                                // whole deadline.
+                                                // being modified keep waiting forever; if there has
+                                                // been no server-side activity for 10 attempts the
+                                                // file is not coming, fail fast.
                                                 let active =
                                                     server_download_active(Some(&context.server_cache_dir));
-                                                if active {
-                                                    if std::time::Instant::now() >= deadline {
-                                                        return Err(anyhow::anyhow!(
-                                                            "failed to get file path for {} after {} minutes",
-                                                            file_id,
-                                                            timeout_min
-                                                        ));
-                                                    }
-                                                } else if attempts >= 10 {
+                                                if !active && attempts >= 10 {
                                                     return Err(anyhow::anyhow!(
                                                         "no server download activity for {} attempts while waiting for {}",
                                                         attempts,
