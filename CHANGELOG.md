@@ -9,7 +9,33 @@ Note: In this file, do not use the hard wrap in the middle of a sentence for com
 -->
 
 ## [Unreleased]
+
+### Added
+
+- 下载前检查磁盘剩余空间，空间不足快速失败，避免写满磁盘
+- 同名文件自动追加 `_1`/`_2` 递增后缀，互不覆盖（便于刮削程序识别）
+- 并发下载限制（`DOWNLOAD_CONCURRENCY`，默认 3）
+- bypass key 持久化到 `bypass.key`，重启后密钥不变；`/bypasskey` 命令需通过认证
+- 启动时向 Telegram 注册命令菜单（`/start` `/help` `/state` `/toggle` `/bypasskey`）
+- 重启后自动恢复中断的下载任务，下载完成自动分类到对应目录
+- trash 目录自动清理（`TRASH_RETENTION_DAYS`，默认 7 天，每小时检查）
+- photo 使用 caption 作为文件名（清洗非法字符后加 `.jpg`，空 caption 回退 file_id）
+- 数据库与下载缓存目录分离（`DB_DIR` / `SERVER_CACHE_DIR`）
+
+### Changed
+
+- 大文件下载不再设置时间上限：本地 server 缓存持续写入则无限等待，连续约 1 分钟无活动才判定失败
+- 下载失败自动重试（最多 3 次），失败/取消时清理下载目录中的半成品文件
+- 日志带本地时区时间戳（TZ=Asia/Shanghai）
+
+### Fixed
+
+- 媒体组原消息删除失败不再中断整个下载流程（记录 warn 后继续）
+- 数据库中出现未知状态值不再 panic，回退到默认状态
+- 本地 server 缓存路径解析、`cp` 在 docker / podman 下的兼容
+
 ## [0.5.3] - 2026-01-30
+
 
 - fix typo
 
