@@ -188,6 +188,14 @@ impl Cli {
                     context.clone(),
                 )
                 .await?;
+                // resume downloads left in Downloading state by a crash/restart:
+                // re-queue them before dispatching updates so files that were
+                // mid-download are finished and classified
+                match storage.resume_downloads().await {
+                    Ok(0) => {}
+                    Ok(n) => info!(">> BOT: resumed {} download task(s)", n),
+                    Err(e) => warn!(">> BOT: failed to resume downloads: {}", e),
+                }
                 // background trash cleaner: remove trash files older than
                 // TRASH_RETENTION_DAYS (default 7), checked every hour
                 {
