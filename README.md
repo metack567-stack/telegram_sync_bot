@@ -158,6 +158,86 @@ sudo crictl image
 kubectl apply -k .
 ```
 
+# Docker 部署
+
+## 使用 docker compose（推荐）
+
+创建 `docker-compose.yml`：
+
+```yaml
+services:
+  server:
+    image: ghcr.io/metack567-stack/telegram_sync_bot/server:latest
+    container_name: tgsync-server
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8081:8081"
+    volumes:
+      - ${TELEGRAM_DATA_DIR}:/app/data
+
+  bot:
+    image: ghcr.io/metack567-stack/telegram_sync_bot/bot:latest
+    container_name: tgsync-bot
+    restart: unless-stopped
+    depends_on:
+      - server
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+      - SERVER_CACHE_DIR=/app/data/server-cache
+      - DB_DIR=/app/db
+    volumes:
+      - ${TELEGRAM_DATA_DIR}:/app/data
+      - ${APP_DATA_DIR}/db:/app/db
+    stop_signal: SIGINT
+    command: run -d /app/data -l http://server:8081
+```
+
+`.env` 中需要额外配置：
+
+```
+TELEGRAM_DATA_DIR=/path/to/data
+APP_DATA_DIR=/path/to/app-data
+```
+
+启动：
+
+```sh
+docker compose up -d
+```
+
+更新到最新镜像：
+
+```sh
+docker compose pull && docker compose up -d
+```
+
+## 使用 docker run
+
+先构建镜像（或从 GHCR 拉取 `ghcr.io/metack567-stack/telegram_sync_bot/bot:dev` / `server:dev`）：
+
+```sh
+docker build -f bot/Containerfile --target bot -t bot:0.X.0 bot
+docker build -f server/Containerfile --target server -t server:latest server
+```
+
+创建网络并启动服务器：
+
+```sh
+docker network create tgsync
+docker run --name server --network tgsync -itd --env-file .env -p 8081:8081 \
+    -v /path/to/data:/app/data server
+```
+
+启动机器人：
+
+```sh
+docker run --name bot --network tgsync -itd --env-file .env --stop-signal SIGINT \
+    -v /path/to/data:/app/data -v /path/to/db:/app/db \
+    bot:0.X.0 run -d /app/data -l http://server:8081
+```
+
 # Systemd 服务
 ## 原生运行（无本地服务器）：
 ```ini
