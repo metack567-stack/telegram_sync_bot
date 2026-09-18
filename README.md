@@ -1,168 +1,95 @@
-# 关于
+# telegram_sync_bot
 
-这是一个 Telegram 机器人（bot），用于下载所有者转发给它的文件。
+一个将 Telegram 文件自动同步到本地服务器（NAS）的机器人。把文件转发给机器人即可自动下载保存；配合托管频道，还能用表情投票实现多人协作文档归档。基于 **Rust + Teloxide** 构建，镜像仅约 **39MB**，轻量高效。
 
-使用 Rust 和 Teloxide 构建。
+## 功能特性
 
-## 直接发送给机器人的文件
+- **一键下载**：把文件转发给机器人，自动下载并保存到指定目录
+- **突破 20MB 限制**：内置本地 Telegram API Server（telegram-bot-api），支持超大文件
+- **表情快速管理**（个人使用）：对消息点 👍/❤ 收藏到 `fav/`，点 👎 移入回收站
+- **频道表情投票**（团队使用）：多人用表情打分，机器人按得分自动归档、置顶或删除
+- **下载文件自动分类**：按类型归档到 `images / videos / audio / documents / other` 子目录
+- **回收站自动清理**：过期文件（默认 7 天）每小时自动清除
+- **断点恢复**：重启后自动恢复未完成的下载任务
+- **硬链接归档**：文件以硬链接方式组织，不重复占用磁盘空间
+- **多态部署**：支持 Docker Compose / Docker / Podman / Kubernetes / 原生 Systemd
 
-机器人会下载文件并保存到指定目录。
+## 工作原理
 
-所有者可以对消息添加表情回应来管理文件：
-- "👍" | "❤"：收藏，并将文件移动到收藏目录
-- "👎"：将文件移动到回收站
+### 1. 直接发送给机器人
 
-## 发送到机器人托管频道的文件
+文件发送给机器人后自动下载保存。所有者可用表情管理文件：
 
-最初，机器人所有者发送 `/toggle <bypasskey>` 给机器人，在以下状态间切换：
-- `paused`：暂停机器人
-- `active`：同步文件并响应表情回应
-- `partially active`：响应表情回应但不同步文件
+| 操作 | 表情 | 效果 |
+| --- | --- | --- |
+| 收藏 | 👍 / ❤ | 移动到 `fav/`（收藏目录） |
+| 删除 | 👎 | 移动到 `trash/`（回收站） |
 
-（`<bypasskey>` 可以在日志中看到，发送 `/bypasskey` 可以重新在日志中打印该密码）
+### 2. 发送到机器人托管频道
 
-机器人会对文件消息设置 "🫡" 表情，表示文件正在下载。
+先发送 `/toggle <bypasskey>` 切换机器人的工作状态（`<bypasskey>` 在日志中可见，`/bypasskey` 可重新打印）：
 
-下载完成后，机器人会设置 "👌"。（失败为 "😭"，取消为 "😨"，内部错误为 "👾"）
+| 状态 | 行为 |
+| --- | --- |
+| `paused` | 暂停，不响应任何文件 |
+| `active` | 同步文件 + 响应表情回应 |
+| `partially active` | 仅响应表情回应，不同步文件 |
 
-人们可以用表情回应文件，机器人会统计文件的得分。
+下载过程中机器人会给消息设置 🫡，完成后改为 👌（失败 😭 / 取消 😨 / 内部错误 👾）。
+
+频道成员用表情给文件打分，机器人统计得分后自动处理：
 
 | 表情 | 得分 |
 | --- | --- |
-|👍😁🙏😇🤗|+1|
-|❤🔥🥰🎉🍌💋💘😘|+2|
-|👎🤯😱😢🥴🌚😐🖕😨|-1|
-|🤬🤮💩🤡💔😡|-2|
+| 👍😁🙏😇🤗 | +1 |
+| ❤🔥🥰🎉🍌💋💘😘 | +2 |
+| 👎🤯😱😢🥴🌚😐🖕😨 | -1 |
+| 🤬🤮💩🤡💔😡 | -2 |
 
-如果得分 >= fav_score_limit，机器人会将文件硬链接到收藏目录并置顶。
+- 得分 `>= fav_score_limit`（默认 10）→ 归档到 `fav/` 并置顶
+- 得分 `< dislike_score_limit`（默认 -10）→ 归档到 `trash/` 并从频道删除
+- 其余 → 归档到 `normal/` 并取消置顶
 
-如果得分 < delete_score_limit，机器人会将文件硬链接到回收站并从频道删除。
+> 注意：Telegram 的表情计数更新有几秒到几分钟延迟，频道场景下的归档会稍晚生效。
 
-否则，机器人会将文件硬链接到 normal 目录，并在必要时取消置顶。
-
-注意：获取 ReactionCountUpdate 需要几分钟，因此机器人不会立即处理频道的表情回应。
-
-# 部署
-
-你可以创建包含以下内容的 `.env` 文件：
+## 文件组织结构
 
 ```
-# 从 BotFather 获取
-TELOXIDE_TOKEN=xxxxxxxxxx:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-# 你的 Telegram ID，在个人资料中可见
-BYPASS_USERS=xxxxx,xxxxx
-# 如果你想使用本地服务器：
-TELEGRAM_API_ID=...
-TELEGRAM_API_HASH=...
+data/                          # 数据目录（-d 指定）
+├── 663919342/                 # 按聊天 ID 分目录
+│   ├── normal/                # 普通文件（自动分类）
+│   │   ├── images/            #   图片 jpg/png/gif/webp…
+│   │   ├── videos/            #   视频 mp4/mkv/webm…
+│   │   ├── audio/             #   音频 mp3/flac/m4a…
+│   │   ├── documents/         #   文档 pdf/zip/docx…
+│   │   └── other/             #   其他
+│   ├── fav/                   # 收藏
+│   └── trash/                 # 回收站（超期自动清理）
+└── *.part / 临时文件           # 下载中（完成后移入分类目录）
 ```
 
-部署方式：
-## 文件大小限制 20MB
+## 环境变量（.env）
 
-```
-一个将文件同步到本地服务器的 Telegram 机器人。
+| 变量 | 必填 | 说明 | 默认值 |
+| --- | --- | --- | --- |
+| `TELOXIDE_TOKEN` | ✅ | 从 [BotFather](https://t.me/BotFather) 获取的机器人 Token | - |
+| `BYPASS_USERS` | - | 可管理的 Telegram 用户 ID，多个用逗号分隔 | 不限制 |
+| `TELEGRAM_API_ID` | * | 本地服务器模式：Telegram API ID | - |
+| `TELEGRAM_API_HASH` | * | 本地服务器模式：Telegram API Hash | - |
+| `TELEGRAM_DATA_DIR` | * | 容器部署：数据目录挂载路径 | - |
+| `APP_DATA_DIR` | * | 容器部署：应用数据（数据库）挂载路径 | - |
+| `DB_DIR` | - | 数据库（data.db）与 bypass.key 存放目录 | 同数据目录 |
+| `SERVER_CACHE_DIR` | - | telegram-bot-api 本地缓存根目录 | - |
+| `TRASH_RETENTION_DAYS` | - | 回收站文件保留天数（每小时检查清理） | 7 |
+| `DOWNLOAD_CONCURRENCY` | - | 同时下载的任务数 | 3 |
 
-用法: telegram_sync_bot <COMMAND>
+`*` 使用本地服务器模式（无 20MB 限制）时需要。API ID / Hash 在 [Telegram 官网](https://core.telegram.org/obtaining_api_id) 申请（申请报错时可尝试 `cloudflare warp` 代理）。
 
-命令:
-  run    运行机器人
-  delete 按 file_name 删除 data 目录中的文件，并删除数据库中的记录，同时删除频道中的消息。数据库不能被其他进程锁定，也不应存在其他机器人实例。
-```
+## 部署
 
-```sh
-telegram_sync_bot run -d /path/to/data
-```
+### 方式一：Docker Compose（推荐）
 
-## 无文件大小限制（本地服务器）
-
-你需要先从 [Telegram](https://core.telegram.org/obtaining_api_id) 申请 telegram api id 和 hash。
-（如果申请时总是出现 `Error`，可以尝试用 `cloudflare warp` 作为 VPN）
-
-以下所有方法都先以容器方式运行本地服务器。
-
-（你也可以原生运行本地服务器，只需在启动 `telegram_sync_bot` 时省略 `-c` 和 `-i` 参数。
-这里不再赘述）
-
-先获取本地服务器镜像：
-
-准备（仅限 Windows 和 MacOS，使用 podman）：
-```sh
-podman machine init -v /path/to/output:/path/to/output bot_machine
-podman machine start bot_machine
-```
-
-你可以使用以下命令构建 telegram api bot 本地服务器镜像：
-```sh
-podman build --target server -t server --network host server
-```
-或者从 Release 页面下载并加载（`server.tar.gz`），我已经通过 GitHub Action 构建好了。
-
-这里提供 4 种方式：
-- native（原生）
-- pod
-- podman kube play
-- k8s
-
-### 常规方式：服务器在容器中，机器人原生运行
-
-```sh
-podman run --name server -itd --env-file .env -p 8081:8081 server
-
-telegram_sync_bot run -d /path/to/output -l http://127.0.0.1:8081 -c podman -i server
-```
-
-### 以 pod 方式运行
-
-将 `telegram_sync_bot` 构建为容器镜像：
-```sh
-# 构建 bot 镜像
-podman build --target bot -t bot:$(cargo pkgid -p telegram_sync_bot | sed -n "s/.*@//p") --network host bot
-```
-或者从 Release 页面下载并加载（bot.tar.gz）。
-
-在 pod 中启动服务器和机器人：
-```sh
-podman pod create sync_bot
-
-podman run --pod sync_bot --name server -itd --env-file .env \
-    -v /path/to/data:/app/data server
-podman run --pod sync_bot --name bot -itd --env-file .env --stop-signal SIGINT \
-    -v /path/to/data:/app/data  \
-    bot:0.X.0 \
-    run -d /app/data -l http://server:8081
-```
-
-### 使用 podman kube play 运行
-
-根据需要修改 `sync-bot.yaml`。
-
-你可以先从 Release 页面下载并加载 `server.tar.gz` 和 `bot.tar.gz`。
-或者使用以下命令自动构建镜像（会花费大量时间）。
-```sh
-podman kube play sync-bot.yaml
-```
-
-### 使用 k8s 运行
-
-先构建并保存镜像为 `.tar.gz`，或从 Release 页面下载。
-
-根据需要修改 `.env` 和 `k8s/pv.yaml` 等文件。
-```sh
-# 加载本地镜像
-sudo ctr -n=k8s.io images import /tmp/server.tar.gz
-sudo ctr -n=k8s.io images import /tmp/bot.tar.gz
-
-sudo crictl image
-# 你应该能看到 localhost/bot 和 localhost/server
-
-kubectl apply -k .
-```
-
-# Docker 部署
-
-## 使用 docker compose（推荐）
-
-创建 `docker-compose.yml`：
+`docker-compose.yml`：
 
 ```yaml
 services:
@@ -194,52 +121,106 @@ services:
     command: run -d /app/data -l http://server:8081
 ```
 
-`.env` 中需要额外配置：
+`.env` 额外配置：
 
 ```
 TELEGRAM_DATA_DIR=/path/to/data
 APP_DATA_DIR=/path/to/app-data
 ```
 
-启动：
+启动 / 更新：
 
 ```sh
-docker compose up -d
+docker compose up -d                                  # 启动
+docker compose pull && docker compose up -d           # 更新到最新镜像
 ```
 
-更新到最新镜像：
+> 镜像托管在 GitHub Container Registry：`ghcr.io/metack567-stack/telegram_sync_bot/{bot,server}`；也可本地构建，见下文。
+
+### 方式二：Docker run
 
 ```sh
-docker compose pull && docker compose up -d
-```
-
-## 使用 docker run
-
-先构建镜像（或从 GHCR 拉取 `ghcr.io/metack567-stack/telegram_sync_bot/bot:dev` / `server:dev`）：
-
-```sh
+# 构建镜像（或直接拉取 GHCR 上的 bot:dev / server:dev）
 docker build -f bot/Containerfile --target bot -t bot:0.X.0 bot
 docker build -f server/Containerfile --target server -t server:latest server
-```
 
-创建网络并启动服务器：
-
-```sh
+# 创建网络并启动本地服务器
 docker network create tgsync
 docker run --name server --network tgsync -itd --env-file .env -p 8081:8081 \
     -v /path/to/data:/app/data server
-```
 
-启动机器人：
-
-```sh
+# 启动机器人
 docker run --name bot --network tgsync -itd --env-file .env --stop-signal SIGINT \
     -v /path/to/data:/app/data -v /path/to/db:/app/db \
     bot:0.X.0 run -d /app/data -l http://server:8081
 ```
 
-# Systemd 服务
-## 原生运行（无本地服务器）：
+### 方式三：Podman
+
+**镜像获取**（二选一）：
+
+```sh
+# 1) 从 Release 页面下载 server.tar.gz / bot.tar.gz 加载
+podman load -i server.tar.gz
+podman load -i bot.tar.gz
+
+# 2) 或本地构建（bot 需 Rust 工具链；server 构建耗时较长）
+podman build --target bot -t bot:$(cargo pkgid -p telegram_sync_bot | sed -n "s/.*@//p") --network host bot
+podman build --target server -t server --network host server
+```
+
+**a) 常规：服务器容器 + 机器人原生**
+
+```sh
+podman run --name server -itd --env-file .env -p 8081:8081 server
+telegram_sync_bot run -d /path/to/output -l http://127.0.0.1:8081 -c podman -i server
+```
+
+**b) Pod 方式**
+
+```sh
+podman pod create sync_bot
+podman run --pod sync_bot --name server -itd --env-file .env \
+    -v /path/to/data:/app/data server
+podman run --pod sync_bot --name bot -itd --env-file .env --stop-signal SIGINT \
+    -v /path/to/data:/app/data \
+    bot:0.X.0 run -d /app/data -l http://server:8081
+```
+
+**c) Podman kube play**
+
+修改 `sync-bot.yaml` 适配你的环境：
+
+```sh
+podman kube play sync-bot.yaml
+```
+
+**d) Kubernetes**
+
+修改 `.env` 和 `k8s/pv.yaml` 等文件：
+
+```sh
+sudo ctr -n=k8s.io images import /tmp/server.tar.gz
+sudo ctr -n=k8s.io images import /tmp/bot.tar.gz
+kubectl apply -k .
+```
+
+### 方式四：原生运行（无需容器）
+
+**20MB 限制模式**（直接使用 Telegram 官方 API）：
+
+```sh
+telegram_sync_bot run -d /path/to/data
+```
+
+**无限制模式**（本地 server 原生运行，省略 `-c`/`-i` 参数即可）：
+
+```sh
+telegram_sync_bot run -d /path/to/output -l http://127.0.0.1:8081
+```
+
+### Systemd 托管
+
 ```ini
 # /etc/systemd/system/sync-bot.service
 [Unit]
@@ -258,74 +239,65 @@ Environment="BYPASS_USERS=<...>"
 [Install]
 WantedBy=multi-user.target
 ```
-## 或使用本地服务器容器 + 原生 telegram_sync_bot（首次设置后）：
-```ini
-# /etc/systemd/system/sync-bot.service
-[Unit]
-Description=Telegram file sync bot
-After=network-online.target
-
-[Service]
-Type=simple
-User=<...>
-WorkingDirectory=</path/to/output>
-ExecStartPre=/usr/bin/podman restart server
-ExecStart=/usr/local/bin/telegram_sync_bot run -l http://127.0.0.1:8081 -c podman -i server
-ExecStop=/bin/bash -c 'kill -SIGINT $MAINPID; for i in {1..5}; do sleep 1; kill -0 $MAINPID 2>/dev/null || exit 0; done; kill -SIGKILL $MAINPID'
-ExecStopPost=/usr/bin/podman stop server
-Restart=on-failure
-Environment="TELOXIDE_TOKEN=<...>"
-Environment="BYPASS_USERS=<...>"
-
-[Install]
-WantedBy=multi-user.target
-```
-## 或纯 pod 方式（构建或加载镜像后）：
-```ini
-# /etc/container/systemd/users/<UserID>/sync-bot.kube
-[Unit]
-Description=Telegram file sync bot
-After=network-online.target
-
-[Kube]
-Yaml=/etc/containers/systemd/users/<UserID>/sync-bot.yaml
-
-[Install]
-WantedBy=default.target
-```
-关于将 podman kube play 作为 systemd 服务使用，请搜索 `podman quadlet`。
 
 ```sh
-systemctl --user daemon-reload
-systemctl start --user sync-bot
+systemctl daemon-reload
+systemctl start sync-bot
 ```
 
-注意：你可以使用 `/usr/lib/systemd/system-generators/podman-system-generator --user --dryrun` 检查生成的服务文件。
+本地服务器容器 + 原生机器人、纯 Pod（quadlet）等更多托管方式见仓库 `server/` 与 `k8s/` 目录。
 
-# 提示
+## 命令行
 
-使用 `fd` 删除数据库、频道消息和 data 目录中的文件：
+```
+用法: telegram_sync_bot <COMMAND>
+
+命令:
+  run    运行机器人
+         -d, --data <DIR>            数据目录
+         -l, --localserver <URL>     本地服务器地址（如 http://127.0.0.1:8081）
+         -c, --container-manager     容器管理器（podman 等）
+         -i, --container-id          容器 ID / 名称
+         -f, --fav-score-limit       收藏得分阈值（默认 10）
+         -F, --dislike-score-limit   删除得分阈值（默认 -10）
+  delete 按文件名删除数据目录中的文件、数据库记录及频道消息
+```
+
+`delete` 使用示例（清理所有图片/视频）：
 
 ```sh
-fd ".*\.[jpg|mp4]" '/path/to/data' -X podman run --name bot -it --env-file .env -v /path/to/data:/app/data --replace bot:0.X.0 delete -d /app/data {/}
+fd ".*\.[jpg|mp4]" '/path/to/data' -X podman run --name bot -it --env-file .env \
+    -v /path/to/data:/app/data --replace bot:0.X.0 delete -d /app/data {/}
 ```
 
-# 开发
+## 开发
 
-**Rust 2024 是必需的**
+要求 **Rust 2024 edition**。
 
-在 `.env` 中设置 `DATABASE_URL` 以生成 entity crate。
+在 `.env` 中设置 `DATABASE_URL` 生成 entity crate：
 
 ```
-# .env
 DATABASE_URL=sqlite://data/data.db
 ```
-
-然后你可以运行以下命令创建数据库并生成 entity：
 
 ```sh
 cargo install sea-orm-cli
 mkdir data
 sea-orm-cli migrate refresh
 sea-orm-cli generate entity --expanded-format -o bot/src/storage/entity/inner
+```
+
+## 项目结构
+
+```
+├── bot/                 # 机器人主程序（Rust crate）
+│   ├── Containerfile    # bot 镜像构建文件
+│   └── src/
+│       ├── handler/     # 消息 / 命令 / 回调 / 表情回应处理
+│       └── storage/     # 数据库、下载传输、文件归档
+├── server/              # telegram-bot-api 本地服务器
+│   ├── Containerfile    # server 镜像构建文件
+│   └── start.sh
+├── .github/workflows/   # CI：镜像构建推送（GHCR）、Release 发布
+└── k8s/                 # Kubernetes 部署清单
 ```
