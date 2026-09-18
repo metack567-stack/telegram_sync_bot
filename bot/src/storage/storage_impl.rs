@@ -10,6 +10,31 @@ use teloxide::types::{ChatId, MessageId};
 use tokio::fs;
 use tracing::{info, instrument, warn};
 
+/// map a file name to the media category subdir under `normal/`.
+/// Telegram gives most files an extension (photo -> .jpg, video -> .mp4,
+/// document -> original name), so extension-based classification is reliable.
+fn classify_file_name(file_name: &str) -> &'static str {
+    let ext = file_name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "bmp"
+        | "svg" | "tif" | "tiff" | "avif" | "ico" => "images",
+        "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "ts" | "flv"
+        | "wmv" | "3gp" | "mpeg" | "mpg" | "rmvb" => "videos",
+        "mp3" | "flac" | "wav" | "m4a" | "aac" | "ogg" | "opus" | "wma"
+        | "amr" | "ape" => "audio",
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt"
+        | "md" | "csv" | "zip" | "rar" | "7z" | "tar" | "gz" | "bz2"
+        | "xz" | "epub" | "apk" | "exe" | "iso" | "dmg" | "deb" | "rpm"
+        | "json" | "xml" => "documents",
+        _ => "other",
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MyStorage {
     db: Db,
@@ -64,11 +89,27 @@ impl MyStorage {
         tracing::Span::current().record("old_state", old_state.to_string());
 
         let dir = self.context.data_dir.join(handle.0.to_string());
-        let new_dir = dir.join(state.to_string().to_lowercase());
+        let new_dir = match state {
+            FileState::Normal => dir.join("normal").join(classify_file_name(&file_name)),
+            other => dir.join(other.to_string().to_lowercase()),
+        };
         fs::create_dir_all(&new_dir).await?;
-        let from = dir
-            .join(old_state.to_string().to_lowercase())
-            .join(&file_name);
+        let old_base = dir.join(old_state.to_string().to_lowercase());
+        // Normal files live in normal/<category>/, but pre-classification
+        // files may still sit directly in normal/ — check both.
+        let from = match old_state {
+            FileState::Normal => {
+                let typed = old_base
+                    .join(classify_file_name(&file_name))
+                    .join(&file_name);
+                if tokio::fs::try_exists(&typed).await.unwrap_or(false) {
+                    typed
+                } else {
+                    old_base.join(&file_name)
+                }
+            }
+            _ => old_base.join(&file_name),
+        };
         let to = new_dir.join(&file_name);
         match fs::rename(&from, &to).await {
             Ok(_) => {
@@ -294,13 +335,10 @@ impl MyStorage {
     fn normal_file_paths(&self, file_name: &str, handle: Option<&(i64, i32)>) -> Vec<PathBuf> {
         let mut paths = vec![self.context.data_dir.join(file_name)];
         if let Some((chat_id, _)) = handle {
-            paths.push(
-                self.context
-                    .data_dir
-                    .join(chat_id.to_string())
-                    .join("normal")
-                    .join(file_name),
-            );
+            let normal = self.context.data_dir.join(chat_id.to_string()).join("normal");
+            paths.push(normal.join(classify_file_name(file_name)).join(file_name));
+            // legacy: files classified before category dirs existed
+            paths.push(normal.join(file_name));
         }
         paths
     }
