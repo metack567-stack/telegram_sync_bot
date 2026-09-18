@@ -11,7 +11,7 @@ use teloxide::{
     prelude::Requester as _,
     types::{InputFile, MediaKind, Message, MessageKind, Update},
 };
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 pub fn msg_handler() -> UpdateHandler<anyhow::Error> {
     Update::filter_message()
@@ -47,9 +47,12 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
                         .try_multiple_times(3)
                         .await?
                         .id;
-                    (|| bot.delete_message(chat_id, old))
+                    if let Err(e) = (|| bot.delete_message(chat_id, old))
                         .try_multiple_times(3)
-                        .await?;
+                        .await
+                    {
+                        warn!(">> BOT: failed to delete original media-group message {}: {}", old, e);
+                    }
                 }
                 Some((file_id, file_name))
             }
@@ -71,9 +74,12 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
                         .try_multiple_times(3)
                         .await?
                         .id;
-                    (|| bot.delete_message(chat_id, old))
+                    if let Err(e) = (|| bot.delete_message(chat_id, old))
                         .try_multiple_times(3)
-                        .await?;
+                        .await
+                    {
+                        warn!(">> BOT: failed to delete original media-group message {}: {}", old, e);
+                    }
                 }
                 Some((file_id, file_name))
             }
@@ -95,16 +101,43 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
                         .try_multiple_times(3)
                         .await?
                         .id;
-                    (|| bot.delete_message(chat_id, old))
+                    if let Err(e) = (|| bot.delete_message(chat_id, old))
                         .try_multiple_times(3)
-                        .await?;
+                        .await
+                    {
+                        warn!(">> BOT: failed to delete original media-group message {}: {}", old, e);
+                    }
                 }
                 Some((file_id, file_name))
             }
             MediaKind::Photo(photo) => {
                 let file = photo.photo.into_iter().max_by_key(|p| p.height).unwrap();
                 let file_id = file.file.id;
-                let file_name = format!("{}.jpg", file_id);
+                // prefer the caption as a readable file name; fall back to the file id
+                let file_name = match photo.caption.as_deref() {
+                    Some(c) if !c.trim().is_empty() => {
+                        let cleaned: String = c
+                            .chars()
+                            .map(|ch| {
+                                if ch.is_ascii_alphanumeric()
+                                    || ch.is_ascii_whitespace()
+                                    || ('\u{4e00}'..='\u{9fa5}').contains(&ch)
+                                {
+                                    ch
+                                } else {
+                                    '_'
+                                }
+                            })
+                            .collect::<String>();
+                        let cleaned = cleaned.trim();
+                        if cleaned.is_empty() {
+                            format!("{}.jpg", file_id)
+                        } else {
+                            format!("{}.jpg", cleaned)
+                        }
+                    }
+                    _ => format!("{}.jpg", file_id),
+                };
                 if photo.media_group_id.is_some() {
                     // break up the group
                     let old = msg_id;
@@ -112,9 +145,12 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
                         .try_multiple_times(3)
                         .await?
                         .id;
-                    (|| bot.delete_message(chat_id, old))
+                    if let Err(e) = (|| bot.delete_message(chat_id, old))
                         .try_multiple_times(3)
-                        .await?;
+                        .await
+                    {
+                        warn!(">> BOT: failed to delete original media-group message {}: {}", old, e);
+                    }
                 }
                 Some((file_id, file_name))
             }

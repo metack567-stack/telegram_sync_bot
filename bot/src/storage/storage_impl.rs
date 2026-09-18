@@ -254,6 +254,40 @@ impl MyStorage {
         Ok(format!("{}_{}{}", stem, ts, ext))
     }
 
+    /// re-queue downloads left in Downloading state by a restart. If the
+    /// local server cache already holds the file, get_file resolves
+    /// instantly and the file gets linked into place and classified.
+    pub async fn resume_downloads(&self) -> Result<usize> {
+        let tasks = self.db.get_downloading_tasks().await?;
+        for (file_id, file_name) in &tasks {
+            if let Some(handle) = self
+                .add_task(file_id.clone(), file_name.clone())
+                .await?
+            {
+                let storage = self.clone();
+                let handle_c = handle.clone();
+                let file_id_c = file_id.clone();
+                tokio::spawn(async move {
+                    if handle_c.result().await == TransportState::Completed {
+                        if let Ok(Some((chat_id, msg_id))) = storage
+                            .get_handle_by_file_id(file_id_c)
+                            .await
+                        {
+                            storage
+                                .set_file_state_by_handle_and_link(
+                                    (chat_id, msg_id),
+                                    FileState::Normal,
+                                )
+                                .await
+                                .ok();
+                        }
+                    }
+                });
+            }
+        }
+        Ok(tasks.len())
+    }
+
     /// cancel a download task
     pub async fn cancel_task_by_handle(&self, chat_id: ChatId, msg_id: MessageId) -> Result<()> {
         match self.db.get_file_id_by_handle((chat_id.0, msg_id.0)).await? {

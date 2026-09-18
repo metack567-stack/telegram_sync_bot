@@ -246,6 +246,9 @@ impl Downloader {
                                             Ok(()) => return Ok(()),
                                             Err(e) => {
                                                 attempt += 1;
+                                                // remove any partial file this failed attempt
+                                                // left behind (e.g. copy interrupted mid-way)
+                                                let _ = fs::remove_file(context.data_dir.join(&file_name)).await;
                                                 if attempt >= 3 {
                                                     return Err(e);
                                                 }

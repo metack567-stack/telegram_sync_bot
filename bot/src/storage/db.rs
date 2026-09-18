@@ -140,6 +140,19 @@ impl Db {
         Ok(())
     }
 
+    /// all file ids/names whose transport state is still Downloading,
+    /// used to resume downloads interrupted by a restart
+    pub(super) async fn get_downloading_tasks(&self) -> Result<Vec<(String, String)>> {
+        let rows = file_state::Entity::find()
+            .filter(file_state::Column::TransportState.eq("Downloading"))
+            .all(&self.db)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.file_id, r.file_name))
+            .collect())
+    }
+
     pub(super) async fn get_file_id_by_handle(&self, handle: (i64, i32)) -> Result<Option<String>> {
         match file_handle::Entity::find_by_id(handle)
             .one(&self.db)
