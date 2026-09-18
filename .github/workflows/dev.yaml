@@ -3,6 +3,10 @@ name: Dev Image
 on:
   push:
     branches: [dev]
+    paths:
+      - 'bot/**'
+      - 'server/**'
+      - '.github/workflows/**' 
 
 permissions:
   contents: read
