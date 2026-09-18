@@ -25,6 +25,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./bot
+          file: ./bot/Containerfile
           target: bot
           push: true
           cache-from: type=gha
@@ -34,6 +35,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./server
+          file: ./server/Containerfile
           target: server
           push: true
           cache-from: type=gha
