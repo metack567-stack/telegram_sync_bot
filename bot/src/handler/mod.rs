@@ -1,8 +1,10 @@
+mod callback;
 mod command;
 mod message;
 mod reaction;
 mod utils;
 
+use callback::callback_handler;
 use message::{channel_post_handler, msg_handler};
 use reaction::{reaction_count_handler, reaction_handler};
 use teloxide::{
@@ -22,4 +24,5 @@ pub fn handler() -> UpdateHandler<anyhow::Error> {
         .branch(channel_post_handler())
         .branch(reaction_handler())
         .branch(reaction_count_handler())
+        .branch(callback_handler())
 }

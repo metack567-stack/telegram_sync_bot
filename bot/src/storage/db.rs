@@ -153,6 +153,19 @@ impl Db {
             .collect())
     }
 
+    /// all file ids/names classified Normal, used by the /clear command to
+    /// wipe the normal directory together with its db records
+    pub(super) async fn get_normal_files(&self) -> Result<Vec<(String, String)>> {
+        let rows = file_state::Entity::find()
+            .filter(file_state::Column::State.eq("Normal"))
+            .all(&self.db)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.file_id, r.file_name))
+            .collect())
+    }
+
     pub(super) async fn get_file_id_by_handle(&self, handle: (i64, i32)) -> Result<Option<String>> {
         match file_handle::Entity::find_by_id(handle)
             .one(&self.db)

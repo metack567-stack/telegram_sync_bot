@@ -21,6 +21,7 @@ Note: In this file, do not use the hard wrap in the middle of a sentence for com
 - trash 目录自动清理（`TRASH_RETENTION_DAYS`，默认 7 天，每小时检查）
 - photo 使用 caption 作为文件名（清洗非法字符后加 `.jpg`，空 caption 回退 file_id）
 - 数据库与下载缓存目录分离（`DB_DIR` / `SERVER_CACHE_DIR`）
+- 新增 `/clear` 命令：一键清空 normal 目录（含确认步骤，不影响 fav/trash 与 TG 消息）
 
 ### Changed
 

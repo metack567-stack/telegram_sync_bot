@@ -7,7 +7,8 @@ use teloxide::{
     dptree::case,
     macros::BotCommands,
     prelude::Requester as _,
-    types::{MediaKind, MediaText, Message, MessageCommon, MessageKind},
+    requests::HasPayload as _,
+    types::{InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MediaText, Message, MessageCommon, MessageKind},
     utils::command::BotCommands as _,
 };
 use tracing::info;
@@ -28,6 +29,8 @@ enum Command {
     Toggle,
     #[command(description = "Print current bypass key in the server side.")]
     BypassKey,
+    #[command(description = "Clear all downloaded files in normal directory.")]
+    Clear,
 }
 
 pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
@@ -77,6 +80,33 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                 info!(">> BOT: curren state of {} {}", msg.chat.id, state);
                 bot.send_message(msg.chat.id, format!("Current State: {}", state))
                     .await?;
+                Ok(())
+            },
+        ))
+        .branch(case![Command::Clear].endpoint(
+            async |bot: Bot, dialogue: MyDialogue, msg: Message, ctx: Context, db: MyStorage| {
+                if !auth(&bot, &dialogue, &msg, &ctx).await? {
+                    info!(">> BOT: auth not pass");
+                    return Ok(());
+                }
+                let (count, bytes) = db.summarize_normal().await?;
+                if count == 0 {
+                    bot.send_message(msg.chat.id, "normal 目录没有文件可清空")
+                        .await?;
+                    return Ok(());
+                }
+                let text = format!(
+                    "📁 normal 目录共 {} 个文件（约 {}）\n确认清空？此操作不可恢复",
+                    count,
+                    crate::utils::format_size(bytes)
+                );
+                let keyboard = InlineKeyboardMarkup::new(vec![vec![
+                    InlineKeyboardButton::callback("✅ 确认清空", "clear:yes"),
+                    InlineKeyboardButton::callback("❌ 取消", "clear:no"),
+                ]]);
+                let mut req = bot.send_message(msg.chat.id, text);
+                req.payload_mut().reply_markup = Some(teloxide::types::ReplyMarkup::InlineKeyboard(keyboard));
+                req.await?;
                 Ok(())
             },
         ))

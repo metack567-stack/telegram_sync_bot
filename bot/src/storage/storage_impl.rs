@@ -3,6 +3,7 @@ use super::{FileId, FileName};
 use super::{db::Db, state::*, transport::Downloader};
 use crate::context::Context;
 use anyhow::{Result, anyhow};
+use std::path::PathBuf;
 use std::sync::Arc;
 use teloxide::Bot;
 use teloxide::types::{ChatId, MessageId};
@@ -286,6 +287,78 @@ impl MyStorage {
             }
         }
         Ok(tasks.len())
+    }
+
+    /// on-disk candidate locations of a Normal-classified file: the flat
+    /// layer (where downloads land) and the normal subdir of its chat
+    fn normal_file_paths(&self, file_name: &str, handle: Option<&(i64, i32)>) -> Vec<PathBuf> {
+        let mut paths = vec![self.context.data_dir.join(file_name)];
+        if let Some((chat_id, _)) = handle {
+            paths.push(
+                self.context
+                    .data_dir
+                    .join(chat_id.to_string())
+                    .join("normal")
+                    .join(file_name),
+            );
+        }
+        paths
+    }
+
+    /// number of files classified Normal and their total on-disk bytes
+    pub async fn summarize_normal(&self) -> Result<(usize, u64)> {
+        let files = self.db.get_normal_files().await?;
+        let mut bytes = 0u64;
+        for (file_id, file_name) in &files {
+            let handle = self.db.get_handle_by_file_id(file_id.clone()).await?;
+            for path in self.normal_file_paths(file_name, handle.as_ref()) {
+                if let Ok(md) = tokio::fs::metadata(&path).await {
+                    if md.is_file() {
+                        bytes += md.len();
+                    }
+                }
+            }
+        }
+        Ok((files.len(), bytes))
+    }
+
+    /// cancel running downloads, then remove all Normal files (classified
+    /// dir + flat layer) together with their db records. Returns
+    /// (files_cleared, bytes_freed).
+    pub async fn clear_normal(&self) -> Result<(usize, u64)> {
+        let files = self.db.get_normal_files().await?;
+        let mut freed = 0u64;
+        let mut seen = std::collections::HashSet::new();
+        for (file_id, file_name) in &files {
+            // cancel a running download first so it does not recreate the file
+            if let Ok(Some((chat_id, msg_id))) = self
+                .db
+                .get_handle_by_file_id(file_id.clone())
+                .await
+            {
+                let _ = self
+                    .cancel_task_by_handle(ChatId(chat_id), MessageId(msg_id))
+                    .await;
+            }
+            let handle = self.db.get_handle_by_file_id(file_id.clone()).await?;
+            for path in self.normal_file_paths(file_name, handle.as_ref()) {
+                let Ok(md) = tokio::fs::metadata(&path).await else { continue };
+                if !md.is_file() {
+                    continue;
+                }
+                // hard links share one inode: count the bytes only once
+                use std::os::unix::fs::MetadataExt;
+                let key = (md.dev(), md.ino());
+                if seen.insert(key) {
+                    freed += md.len();
+                }
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    warn!(">> CLEAR: failed to remove {}: {}", path.display(), e);
+                }
+            }
+            self.db.delete_file_record(file_id.clone()).await.ok();
+        }
+        Ok((files.len(), freed))
     }
 
     /// cancel a download task

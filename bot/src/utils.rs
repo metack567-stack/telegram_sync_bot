@@ -83,6 +83,22 @@ pub fn available_bytes(path: &Path) -> Result<u64> {
     Ok(s.f_bsize as u64 * s.f_bavail as u64)
 }
 
+/// human-readable size, e.g. 2.4 GB / 812 KB / 512 B
+pub fn format_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 pub fn gen_key() -> String {
     #[cfg(debug_assertions)]
     const KEY_LEN: usize = 1;

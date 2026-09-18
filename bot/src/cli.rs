@@ -176,6 +176,7 @@ impl Cli {
                         BotCommand::new("state", "Show current state"),
                         BotCommand::new("toggle", "Switch paused/active state, renew to rotate key"),
                         BotCommand::new("bypasskey", "Print bypass key"),
+                        BotCommand::new("clear", "Clear all downloaded files in normal directory"),
                     ];
                     match bot.set_my_commands(commands).await {
                         Ok(_) => info!(">> INIT: command menu registered"),
