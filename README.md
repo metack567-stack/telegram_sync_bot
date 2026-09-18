@@ -1,109 +1,109 @@
-# About
+# 关于
 
-This is a telegram bot that can be used to download files forwarded to the bot by the owner.
+这是一个 Telegram 机器人（bot），用于下载所有者转发给它的文件。
 
-Build with Rust and Teloxide.
+使用 Rust 和 Teloxide 构建。
 
-## file sent directly to the bot
+## 直接发送给机器人的文件
 
-The bot will download the file and save it to the specified directory.
+机器人会下载文件并保存到指定目录。
 
-The owner can then react to the messages with emoji to manage the file:
-- "👍" | "❤": pin and move the file to favorite directory
-- "👎": move the file to trash
+所有者可以对消息添加表情回应来管理文件：
+- "👍" | "❤"：收藏，并将文件移动到收藏目录
+- "👎"：将文件移动到回收站
 
-## file sent to bot managed channel
+## 发送到机器人托管频道的文件
 
-Initially, the bot owner send `/toggle <bypasskey>` to the bot to toggle among states:
-- `paused`: pause the bot
-- `active`: sync files and answer reactions
-- `partially active`: answer reactions but not sync files
+最初，机器人所有者发送 `/toggle <bypasskey>` 给机器人，在以下状态间切换：
+- `paused`：暂停机器人
+- `active`：同步文件并响应表情回应
+- `partially active`：响应表情回应但不同步文件
 
-(the `<bypasskey>` can be seen in the log, and send `/bypasskey` to reprint the pwd in the log)
+（`<bypasskey>` 可以在日志中看到，发送 `/bypasskey` 可以重新在日志中打印该密码）
 
-The bot will set "🫡" reaction to the file message to indicate the file is downloading.
+机器人会对文件消息设置 "🫡" 表情，表示文件正在下载。
 
-Once done, the bot will set "👌". ("😭" if failed, "😨" if canceled, "👾" for inner bug)
+下载完成后，机器人会设置 "👌"。（失败为 "😭"，取消为 "😨"，内部错误为 "👾"）
 
-People can react to the file with emoji, and the bot will count the score of the file.
+人们可以用表情回应文件，机器人会统计文件的得分。
 
-| Emoji | Score |
+| 表情 | 得分 |
 | --- | --- |
 |👍😁🙏😇🤗|+1|
 |❤🔥🥰🎉🍌💋💘😘|+2|
 |👎🤯😱😢🥴🌚😐🖕😨|-1|
 |🤬🤮💩🤡💔😡|-2|
 
-If the score >= fav_score_limit, the bot will hard-link the file to favorite directory and pin it.
+如果得分 >= fav_score_limit，机器人会将文件硬链接到收藏目录并置顶。
 
-If the score < delete_score_limit, the bot will hard-link the file to trash and delete from channel.
+如果得分 < delete_score_limit，机器人会将文件硬链接到回收站并从频道删除。
 
-Otherwise, the bot will hard-link the file to normal directory and unpin the file if necessary.
+否则，机器人会将文件硬链接到 normal 目录，并在必要时取消置顶。
 
-Note: it takes minites to get ReactionCountUpdate, so the bot will not handle reaction from channel immediately.
+注意：获取 ReactionCountUpdate 需要几分钟，因此机器人不会立即处理频道的表情回应。
 
-# Deploy
+# 部署
 
-You could create a `.env` file with the following content:
+你可以创建包含以下内容的 `.env` 文件：
 
 ```
-# Get from botfather
+# 从 BotFather 获取
 TELOXIDE_TOKEN=xxxxxxxxxx:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-# Your telegram id found in your profile
+# 你的 Telegram ID，在个人资料中可见
 BYPASS_USERS=xxxxx,xxxxx
-# if you want to use local server:
+# 如果你想使用本地服务器：
 TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
 ```
 
-Deploy:
-## File size limit 20MB
+部署方式：
+## 文件大小限制 20MB
 
 ```
-A telegram bot to sync files to local server.
+一个将文件同步到本地服务器的 Telegram 机器人。
 
-Usage: telegram_sync_bot <COMMAND>
+用法: telegram_sync_bot <COMMAND>
 
-Commands:
-  run     Run the bot
-  delete  Delete files by file_name in the data dir, and delete the record in the database, delete the message in the channel. The database should not be locked by other process, and there should not be any other bot instance.
+命令:
+  run    运行机器人
+  delete 按 file_name 删除 data 目录中的文件，并删除数据库中的记录，同时删除频道中的消息。数据库不能被其他进程锁定，也不应存在其他机器人实例。
 ```
 
 ```sh
 telegram_sync_bot run -d /path/to/data
 ```
 
-## No file size limit (local server)
+## 无文件大小限制（本地服务器）
 
-You need to apply for telegram api id and hash from [Telegram](https://core.telegram.org/api/obtaining_api_id) first.
-(If you always get `Error` during applying, try `cloudflare warp` as VPN)
+你需要先从 [Telegram](https://core.telegram.org/obtaining_api_id) 申请 telegram api id 和 hash。
+（如果申请时总是出现 `Error`，可以尝试用 `cloudflare warp` 作为 VPN）
 
-All methods below running local server in container first.
+以下所有方法都先以容器方式运行本地服务器。
 
-(You can also run local server natively, just omit `-c` and `-i` args when start `telegram_sync_bot`.
-I'll just skip this method here)
+（你也可以原生运行本地服务器，只需在启动 `telegram_sync_bot` 时省略 `-c` 和 `-i` 参数。
+这里不再赘述）
 
-Get local server image first:
+先获取本地服务器镜像：
 
-Prepare (Windows and MacOS with podman only):
+准备（仅限 Windows 和 MacOS，使用 podman）：
 ```sh
 podman machine init -v /path/to/output:/path/to/output bot_machine
 podman machine start bot_machine
 ```
 
-You can use the following command to build the telegram api bot local server image:
+你可以使用以下命令构建 telegram api bot 本地服务器镜像：
 ```sh
 podman build --target server -t server --network host server
 ```
-Or download and load from the release page (`server.tar.gz`), I've built one through GitHub Action for you.
+或者从 Release 页面下载并加载（`server.tar.gz`），我已经通过 GitHub Action 构建好了。
 
-We provide 4 ways here:
-- native
+这里提供 4 种方式：
+- native（原生）
 - pod
 - podman kube play
 - k8s
 
-### normal way: server in container but bot native
+### 常规方式：服务器在容器中，机器人原生运行
 
 ```sh
 podman run --name server -itd --env-file .env -p 8081:8081 server
@@ -111,16 +111,16 @@ podman run --name server -itd --env-file .env -p 8081:8081 server
 telegram_sync_bot run -d /path/to/output -l http://127.0.0.1:8081 -c podman -i server
 ```
 
-### run as pod
+### 以 pod 方式运行
 
-Build `telegram_sync_bot` into container image:
+将 `telegram_sync_bot` 构建为容器镜像：
 ```sh
-# build bot image
+# 构建 bot 镜像
 podman build --target bot -t bot:$(cargo pkgid -p telegram_sync_bot | sed -n "s/.*@//p") --network host bot
 ```
-Or download and load from the release page (bot.tar.gz).
+或者从 Release 页面下载并加载（bot.tar.gz）。
 
-Start server and bot in a pod:
+在 pod 中启动服务器和机器人：
 ```sh
 podman pod create sync_bot
 
@@ -132,34 +132,34 @@ podman run --pod sync_bot --name bot -itd --env-file .env --stop-signal SIGINT \
     run -d /app/data -l http://server:8081
 ```
 
-### run with podman kube play
+### 使用 podman kube play 运行
 
-Modify `sync-bot.yaml` to fit your need.
+根据需要修改 `sync-bot.yaml`。
 
-You can download and load `server.tar.gz` and `bot.tar.gz` from the release page first.
-Or command below will automatically build the images for you which cost a lot of time.
+你可以先从 Release 页面下载并加载 `server.tar.gz` 和 `bot.tar.gz`。
+或者使用以下命令自动构建镜像（会花费大量时间）。
 ```sh
 podman kube play sync-bot.yaml
 ```
 
-### run with k8s
+### 使用 k8s 运行
 
-Build and save the image as `.tar.gz` or download from the release page first.
+先构建并保存镜像为 `.tar.gz`，或从 Release 页面下载。
 
-Modify `.env` and `k8s/pv.yaml` and so on to fit your need.
+根据需要修改 `.env` 和 `k8s/pv.yaml` 等文件。
 ```sh
-# load local images
+# 加载本地镜像
 sudo ctr -n=k8s.io images import /tmp/server.tar.gz
 sudo ctr -n=k8s.io images import /tmp/bot.tar.gz
 
 sudo crictl image
-# you should see localhost/bot and localhost/server available
+# 你应该能看到 localhost/bot 和 localhost/server
 
 kubectl apply -k .
 ```
 
-# Systemd Service
-## Native without local server:
+# Systemd 服务
+## 原生运行（无本地服务器）：
 ```ini
 # /etc/systemd/system/sync-bot.service
 [Unit]
@@ -178,7 +178,7 @@ Environment="BYPASS_USERS=<...>"
 [Install]
 WantedBy=multi-user.target
 ```
-## or with local server container and native telegram_sync_bot (after the first setup):
+## 或使用本地服务器容器 + 原生 telegram_sync_bot（首次设置后）：
 ```ini
 # /etc/systemd/system/sync-bot.service
 [Unit]
@@ -200,7 +200,7 @@ Environment="BYPASS_USERS=<...>"
 [Install]
 WantedBy=multi-user.target
 ```
-## or with pure pod (after images are built or loaded):
+## 或纯 pod 方式（构建或加载镜像后）：
 ```ini
 # /etc/container/systemd/users/<UserID>/sync-bot.kube
 [Unit]
@@ -213,35 +213,35 @@ Yaml=/etc/containers/systemd/users/<UserID>/sync-bot.yaml
 [Install]
 WantedBy=default.target
 ```
-Search `podman quadlet` for using podman kube play as systemd service.
+关于将 podman kube play 作为 systemd 服务使用，请搜索 `podman quadlet`。
 
 ```sh
 systemctl --user daemon-reload
 systemctl start --user sync-bot
 ```
 
-Note: you can use `/usr/lib/systemd/system-generators/podman-system-generator --user --dryrun` to check the generated service file.
+注意：你可以使用 `/usr/lib/systemd/system-generators/podman-system-generator --user --dryrun` 检查生成的服务文件。
 
-# Tips
+# 提示
 
-Use `fd` to delete database, channel message, and files in the data dir,
+使用 `fd` 删除数据库、频道消息和 data 目录中的文件：
 
 ```sh
 fd ".*\.[jpg|mp4]" '/path/to/data' -X podman run --name bot -it --env-file .env -v /path/to/data:/app/data --replace bot:0.X.0 delete -d /app/data {/}
 ```
 
-# Development
+# 开发
 
-**Rust 2024 is essencial**
+**Rust 2024 是必需的**
 
-Set `DATABASE_URL` in `.env` to generate entity crate.
+在 `.env` 中设置 `DATABASE_URL` 以生成 entity crate。
 
 ```
 # .env
 DATABASE_URL=sqlite://data/data.db
 ```
 
-Then you can run the following command to create the database and generate the entity:
+然后你可以运行以下命令创建数据库并生成 entity：
 
 ```sh
 cargo install sea-orm-cli
