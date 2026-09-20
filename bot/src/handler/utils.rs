@@ -41,7 +41,9 @@ pub(super) trait TryMultipleTimes: Sized {
         Self: Fn() -> Fut,
         Fut: IntoFuture<Output = Result<T, E>>,
     {
-        for _ in 0..times - 1 {
+        // `1..times` instead of `0..times - 1`: the latter underflows (and in
+        // release mode loops forever) when times == 0
+        for _ in 1..times {
             if let Ok(t) = self().await {
                 return Ok(t);
             }

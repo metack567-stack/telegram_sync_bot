@@ -138,7 +138,7 @@ impl Downloader {
                                             }
                                             Err(e) => {
                                                 attempts += 1;
-                                                if attempts == 1 || attempts % 20 == 0 {
+                                                if attempts == 1 || attempts.is_multiple_of(20) {
                                                     warn!(
                                                         ">> DOWNLOADER: get_file attempt {} failed for {}: {}",
                                                         attempts,
@@ -307,7 +307,7 @@ impl Downloader {
                             }
                             Message::Shutdown => {
                                 info!(">> DOWNLOADER: shutdown");
-                                for (_, cancel) in cancels.read().iter() {
+                                for cancel in cancels.read().values() {
                                     cancel.cancel();
                                 }
                                 break;
@@ -369,10 +369,10 @@ impl Downloader {
     /// remove a finished handle from the map, only if it is still the same handle
     pub(super) fn remove(&self, file_id: &str, handle: &TransportHandle) {
         let mut w = self.downloads.write();
-        if let Some(h) = w.get(file_id) {
-            if std::sync::Arc::ptr_eq(&h.state, &handle.state) {
-                w.remove(file_id);
-            }
+        if let Some(h) = w.get(file_id)
+            && std::sync::Arc::ptr_eq(&h.state, &handle.state)
+        {
+            w.remove(file_id);
         }
     }
 
@@ -403,12 +403,11 @@ fn server_download_active(cache_dir: Option<&std::path::Path>) -> bool {
                 if !md.is_file() || md.len() == 0 {
                     continue;
                 }
-                if let Ok(modified) = md.modified() {
-                    if let Ok(elapsed) = modified.elapsed() {
-                        if elapsed.as_secs() < 60 {
-                            return true;
-                        }
-                    }
+                if let Ok(modified) = md.modified()
+                    && let Ok(elapsed) = modified.elapsed()
+                    && elapsed.as_secs() < 60
+                {
+                    return true;
                 }
             }
         }

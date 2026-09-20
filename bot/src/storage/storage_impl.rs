@@ -128,7 +128,7 @@ impl MyStorage {
             Err(_) => {
                 let origin = self.context.data_dir.join(&file_name);
                 let db = self.db.clone();
-                tokio::spawn(async move {
+                let classify = tokio::spawn(async move {
                     // wait until the flat-layer file appears (download finished) or
                     // the download task reaches a terminal state (failed/cancelled),
                     // whichever comes first. The safety cap below only guards against
@@ -180,6 +180,14 @@ impl MyStorage {
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     }
                     Err(anyhow!("File not exists {}", file_name))
+                });
+                // log background-task errors instead of silently dropping them
+                tokio::spawn(async move {
+                    match classify.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => warn!(">> STORAGE: background classify task failed: {}", e),
+                        Err(e) => warn!(">> STORAGE: background classify task panicked: {}", e),
+                    }
                 });
             }
         }
@@ -257,7 +265,7 @@ impl MyStorage {
         let db = self.db.clone();
         let downloader_c = self.downloader.clone();
         let handle_c = handle.clone();
-        tokio::spawn(async move {
+        let state_sync = tokio::spawn(async move {
             while TransportState::Pending == handle_c.get_state() {
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             }
@@ -272,6 +280,14 @@ impl MyStorage {
             // drop the finished handle so the map does not grow forever
             downloader_c.remove(&file_id, &handle_c);
             Ok::<_, anyhow::Error>(())
+        });
+        // log background-task errors instead of silently dropping them
+        tokio::spawn(async move {
+            match state_sync.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!(">> STORAGE: download state sync failed: {}", e),
+                Err(e) => warn!(">> STORAGE: download state sync panicked: {}", e),
+            }
         });
         Ok(Some(handle))
     }
@@ -313,19 +329,15 @@ impl MyStorage {
                 let handle_c = handle.clone();
                 let file_id_c = file_id.clone();
                 tokio::spawn(async move {
-                    if handle_c.result().await == TransportState::Completed {
-                        if let Ok(Some((chat_id, msg_id))) = storage
+                    if handle_c.result().await == TransportState::Completed
+                        && let Ok(Some((chat_id, msg_id))) = storage
                             .get_handle_by_file_id(file_id_c)
                             .await
-                        {
-                            storage
-                                .set_file_state_by_handle_and_link(
-                                    (chat_id, msg_id),
-                                    FileState::Normal,
-                                )
-                                .await
-                                .ok();
-                        }
+                        && let Err(e) = storage
+                            .set_file_state_by_handle_and_link((chat_id, msg_id), FileState::Normal)
+                            .await
+                    {
+                        warn!(">> STORAGE: failed to classify resumed download: {}", e);
                     }
                 });
             }
@@ -350,11 +362,18 @@ impl MyStorage {
     pub async fn summarize_normal(&self) -> Result<(usize, u64)> {
         let files = self.db.get_normal_files().await?;
         let mut bytes = 0u64;
+        // hard links (flat layer + classified dir) share one inode: count the
+        // bytes only once, same as clear_normal
+        let mut seen = std::collections::HashSet::new();
         for (file_id, file_name) in &files {
             let handle = self.db.get_handle_by_file_id(file_id.clone()).await?;
             for path in self.normal_file_paths(file_name, handle.as_ref()) {
-                if let Ok(md) = tokio::fs::metadata(&path).await {
-                    if md.is_file() {
+                if let Ok(md) = tokio::fs::metadata(&path).await
+                    && md.is_file()
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let key = (md.dev(), md.ino());
+                    if seen.insert(key) {
                         bytes += md.len();
                     }
                 }

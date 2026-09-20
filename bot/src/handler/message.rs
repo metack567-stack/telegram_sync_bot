@@ -34,8 +34,8 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
         dialogue.exit().await?;
         return Ok(());
     }
-    if let MessageKind::Common(common_msg) = msg.kind {
-        if let Some((file_id, file_name)) = match common_msg.media_kind {
+    if let MessageKind::Common(common_msg) = msg.kind
+        && let Some((file_id, file_name)) = match common_msg.media_kind {
             MediaKind::Document(document) => {
                 // gif will be handled here too
                 let file_id = document.document.file.id;
@@ -174,7 +174,7 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
             if chat_state == ChatState::PartiallyActive {
                 return Ok(());
             }
-            tokio::spawn(async move {
+            let file_task = tokio::spawn(async move {
                 (|| set_emoji(&bot, chat_id, msg_id, "🫡"))
                     .try_multiple_times(3)
                     .await?;
@@ -196,7 +196,14 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
                     .ok();
                 Result::<_, anyhow::Error>::Ok(())
             });
+            // log background-task errors instead of silently dropping them
+            tokio::spawn(async move {
+                match file_task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!(">> BOT: background file processing failed: {}", e),
+                    Err(e) => warn!(">> BOT: background file processing panicked: {}", e),
+                }
+            });
         }
-    }
     Ok(())
 }

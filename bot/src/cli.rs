@@ -143,7 +143,7 @@ impl Cli {
                                 Ok(bypass_users) if !bypass_users.is_empty() => {
                                     let mut res = HashSet::new();
                                     for id in bypass_users.split(',') {
-                                        info!(">> INIT: BYPASS_USER: {}", bypass_users);
+                                        info!(">> INIT: BYPASS_USER: {}", id);
                                         res.insert(UserId(id.parse()?));
                                     }
                                     Some(res)
