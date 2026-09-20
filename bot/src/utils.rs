@@ -71,6 +71,16 @@ pub fn save_key(data_dir: &Path, key: &str) {
     }
 }
 
+/// whether reactions on untracked messages should delete those messages.
+/// Opt-in via DELETE_UNKNOWN_MESSAGES=on/1/true/yes; default off so the bot
+/// never removes messages it does not own (e.g. in a shared channel).
+pub fn delete_unknown_messages() -> bool {
+    matches!(
+        std::env::var("DELETE_UNKNOWN_MESSAGES").as_deref(),
+        Ok("on" | "1" | "true" | "yes")
+    )
+}
+
 /// available bytes on the filesystem containing `path`
 pub fn available_bytes(path: &Path) -> Result<u64> {
     use std::os::unix::ffi::OsStrExt;
@@ -100,9 +110,8 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 pub fn gen_key() -> String {
-    #[cfg(debug_assertions)]
-    const KEY_LEN: usize = 1;
-    #[cfg(not(debug_assertions))]
+    // always 16 chars: a shorter key in debug builds would be trivially
+    // guessable if a dev build is ever run against a real instance
     const KEY_LEN: usize = 16;
     rand::rng()
         .sample_iter(Alphanumeric)

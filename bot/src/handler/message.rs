@@ -129,7 +129,9 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
                                 }
                             })
                             .collect::<String>();
-                        let cleaned = cleaned.trim();
+                        // cap the length: a long caption would produce a file
+                        // name too long for the filesystem
+                        let cleaned: String = cleaned.trim().chars().take(80).collect();
                         if cleaned.is_empty() {
                             format!("{}.jpg", file_id)
                         } else {

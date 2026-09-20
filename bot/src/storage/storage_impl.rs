@@ -37,7 +37,10 @@ fn classify_file_name(file_name: &str) -> &'static str {
 
 #[derive(Debug, Clone)]
 pub struct MyStorage {
-    db: Db,
+    // Arc<Db> keeps MyStorage cheaply cloneable even when DatabaseConnection
+    // itself is not Clone (e.g. under the `mock` feature), so --all-features
+    // builds (and CI clippy) pass
+    db: Arc<Db>,
     downloader: Arc<Downloader>,
     context: Context,
     file_name_lock: Arc<tokio::sync::Mutex<()>>,
@@ -45,7 +48,7 @@ pub struct MyStorage {
 
 impl MyStorage {
     pub async fn new(database_url: impl AsRef<str>, bot: Bot, context: Context) -> Result<Self> {
-        let db = Db::new(database_url).await?;
+        let db = Arc::new(Db::new(database_url).await?);
         let downloader = Arc::new(Downloader::new(bot, context.clone()));
         Ok(Self {
             db,
@@ -434,12 +437,15 @@ impl MyStorage {
                 if !entry.file_type().await?.is_file() {
                     continue;
                 }
-                let modified = entry
-                    .metadata()
-                    .await?
-                    .modified()
+                // use ctime (not mtime): rename/hard-link updates ctime, so a
+                // file downloaded long ago but only trashed today is counted
+                // from the moment it entered the trash.
+                use std::os::unix::fs::MetadataExt;
+                let md = entry.metadata().await?;
+                let trash_time = std::time::SystemTime::UNIX_EPOCH
+                    .checked_add(std::time::Duration::from_secs(md.ctime().max(0) as u64))
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                if modified > cutoff {
+                if trash_time > cutoff {
                     continue;
                 }
                 let file_name = entry.file_name().to_string_lossy().to_string();

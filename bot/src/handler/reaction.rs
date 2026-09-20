@@ -85,10 +85,14 @@ async fn reaction_handle(
                 }
             }
         } else {
-            (|| bot.delete_message(chat_id, msg_id))
-                .try_multiple_times(3)
-                .await?;
-            info!(">> BOT: deleted out of control message");
+            if crate::utils::delete_unknown_messages() {
+                (|| bot.delete_message(chat_id, msg_id))
+                    .try_multiple_times(3)
+                    .await?;
+                info!(">> BOT: deleted out of control message");
+            } else {
+                debug!(">> BOT: ignored reaction on untracked message ({}, {})", chat_id, msg_id);
+            }
         }
     }
     Ok(())
@@ -174,11 +178,15 @@ async fn reaction_count_handle(
                 info!(">> BOT: unfav file-handle ({} {})", chat_id, msg_id);
             }
         } else {
-            debug!("Unknown file state");
-            (|| bot.delete_message(chat_id, msg_id))
-                .try_multiple_times(3)
-                .await?;
-            info!(">> BOT: deleted out of control message");
+            if crate::utils::delete_unknown_messages() {
+                debug!("Unknown file state");
+                (|| bot.delete_message(chat_id, msg_id))
+                    .try_multiple_times(3)
+                    .await?;
+                info!(">> BOT: deleted out of control message");
+            } else {
+                debug!(">> BOT: ignored reaction count on untracked message ({}, {})", chat_id, msg_id);
+            }
         }
     }
     Ok(())

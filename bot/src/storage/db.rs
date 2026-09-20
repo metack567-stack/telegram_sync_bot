@@ -14,16 +14,20 @@ pub(super) async fn establish_connection(
 ) -> Result<DatabaseConnection> {
     info!("Connecting to database");
     let connection = Database::connect(database_url.as_ref()).await?;
-    #[cfg(debug_assertions)]
-    Migrator::refresh(&connection).await?;
-    #[cfg(not(debug_assertions))]
-    Migrator::up(&connection, None).await?;
+    // refresh drops and recreates every table: only run it when explicitly
+    // requested (RESET_DB=1), never implicitly in a debug build, or a dev
+    // run against a real data dir would wipe all records.
+    if std::env::var_os("RESET_DB").is_some() {
+        Migrator::refresh(&connection).await?;
+    } else {
+        Migrator::up(&connection, None).await?;
+    }
 
     info!("Connected to database");
     Ok(connection)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct Db {
     db: DatabaseConnection,
 }

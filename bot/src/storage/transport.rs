@@ -276,8 +276,16 @@ impl Downloader {
                                             match res {
                                                 Ok(_) => handle.set_state(TransportState::Completed),
                                                 Err(e) => {
-                                                    warn!(">> DOWNLOADER {}", e);
-                                                    handle.set_state(TransportState::Failed);
+                                                    // a user cancel can surface as an error here
+                                                    // (e.g. the download returned "cancelled"); keep
+                                                    // the state Cancelled instead of Failed so the
+                                                    // caller shows the right result
+                                                    if handle.is_cancelled() {
+                                                        handle.set_state(TransportState::Cancelled);
+                                                    } else {
+                                                        warn!(">> DOWNLOADER {}", e);
+                                                        handle.set_state(TransportState::Failed);
+                                                    }
                                                 },
                                             }
                                             handle.cancel(); // when downloading, await cancel.cancelled() avoiding loop checking
