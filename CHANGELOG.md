@@ -22,18 +22,29 @@ Note: In this file, do not use the hard wrap in the middle of a sentence for com
 - photo 使用 caption 作为文件名（清洗非法字符后加 `.jpg`，空 caption 回退 file_id）
 - 数据库与下载缓存目录分离（`DB_DIR` / `SERVER_CACHE_DIR`）
 - 新增 `/clear` 命令：一键清空 normal 目录（含确认步骤，不影响 fav/trash 与 TG 消息）
+- 新增 `DELETE_UNKNOWN_MESSAGES` 环境变量：对未跟踪消息点表情时删除该消息，默认关闭（保护共享频道中机器人未管理的消息）
+- 新增 `RESET_DB` 环境变量：调试用，设置后启动时重建数据库表（默认只迁移，不再清库）
+- photo caption 文件名截断到 80 字符，避免超长文件名
 
 ### Changed
 
 - 大文件下载不再设置时间上限：本地 server 缓存持续写入则无限等待，连续约 1 分钟无活动才判定失败
 - 下载失败自动重试（最多 3 次），失败/取消时清理下载目录中的半成品文件
 - 日志带本地时区时间戳（TZ=Asia/Shanghai）
+- bypass key 恒为 16 位（不再因构建类型而缩短）
+- 回收站清理按文件进入回收站的时间（ctime）计算保留期，而非下载时间（mtime）
+- bot 构建镜像升级至 Rust 1.88（clippy 告警全部清理）
 
 ### Fixed
 
 - 媒体组原消息删除失败不再中断整个下载流程（记录 warn 后继续）
 - 数据库中出现未知状态值不再 panic，回退到默认状态
 - 本地 server 缓存路径解析、`cp` 在 docker / podman 下的兼容
+- debug（非 release）构建启动不再清空数据库（原实现 debug 下会重建表导致数据丢失）
+- `try_multiple_times(0)` 不再下溢 / 死循环
+- 用户取消的下载不再被误标为失败
+- 后台任务（下载状态同步、文件分类等待、消息处理）出错或 panic 现在会记录日志
+- `summarize` / `clear` 统计按 inode 去重，硬链接文件不再重复计算字节
 
 ## [0.5.3] - 2026-01-30
 

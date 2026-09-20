@@ -25,6 +25,8 @@
 | 收藏 | 👍 / ❤ | 移动到 `fav/`（收藏目录） |
 | 删除 | 👎 | 移动到 `trash/`（回收站） |
 
+> 对机器人未跟踪的消息（例如共享频道里别人发的消息）点表情时，**默认不会删除**该消息；如需此行为，设置 `DELETE_UNKNOWN_MESSAGES=on`。
+
 ### 2. 发送到机器人托管频道
 
 先发送 `/toggle <bypasskey>` 切换机器人的工作状态（`<bypasskey>` 在日志中可见，`/bypasskey` 可重新打印）：
@@ -82,6 +84,8 @@ data/                          # 数据目录（-d 指定）
 | `SERVER_CACHE_DIR` | - | telegram-bot-api 本地缓存根目录 | - |
 | `TRASH_RETENTION_DAYS` | - | 回收站文件保留天数（每小时检查清理） | 7 |
 | `DOWNLOAD_CONCURRENCY` | - | 同时下载的任务数 | 3 |
+| `DELETE_UNKNOWN_MESSAGES` | - | 对未跟踪消息点表情时删除该消息（`on`/`1`/`true`/`yes` 开启） | 关闭（不删除） |
+| `RESET_DB` | - | 调试用：设置任意值后启动时重建数据库表（**会清空全部数据**） | 不设置（只迁移，不清库） |
 
 `*` 使用本地服务器模式（无 20MB 限制）时需要。API ID / Hash 在 [Telegram 官网](https://core.telegram.org/obtaining_api_id) 申请（申请报错时可尝试 `cloudflare warp` 代理）。
 
@@ -272,7 +276,7 @@ fd ".*\.[jpg|mp4]" '/path/to/data' -X podman run --name bot -it --env-file .env 
 
 ## 开发
 
-要求 **Rust 2024 edition**。
+要求 **Rust 1.88+（2024 edition）**（代码使用了 let-chains）。
 
 在 `.env` 中设置 `DATABASE_URL` 生成 entity crate：
 
