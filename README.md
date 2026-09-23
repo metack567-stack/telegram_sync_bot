@@ -12,6 +12,7 @@
 - **回收站自动清理**：过期文件（默认 7 天）每小时自动清除
 - **断点恢复**：重启后自动恢复未完成的下载任务
 - **硬链接归档**：文件以硬链接方式组织，不重复占用磁盘空间
+- **sqmusic 音乐联动**：`/music <歌名>` 搜索并下载歌曲（对接本机 sqmusic「简单音乐」，自动落盘到音乐库并回传音频文件）
 - **多态部署**：支持 Docker Compose / Docker / Podman / Kubernetes / 原生 Systemd
 
 ## 工作原理
@@ -86,8 +87,14 @@ data/                          # 数据目录（-d 指定）
 | `DOWNLOAD_CONCURRENCY` | - | 同时下载的任务数 | 3 |
 | `DELETE_UNKNOWN_MESSAGES` | - | 对未跟踪消息点表情时删除该消息（`on`/`1`/`true`/`yes` 开启） | 关闭（不删除） |
 | `RESET_DB` | - | 调试用：设置任意值后启动时重建数据库表（**会清空全部数据**） | 不设置（只迁移，不清库） |
+| `SQMUSIC_URL` | * | sqmusic 后端地址（启用 `/music` 联动），如 `http://sqmusic_main:8099` | 不设置（功能关闭） |
+| `SQMUSIC_USER` | * | sqmusic 登录用户名 | `admin` |
+| `SQMUSIC_PASS` | * | sqmusic 登录密码 | `admin` |
+| `MUSIC_DIR` | * | sqmusic 音乐库目录在 bot 容器内的挂载路径（如 `/music`），用于下载后回传文件 | 不设置（功能关闭） |
 
 `*` 使用本地服务器模式（无 20MB 限制）时需要。API ID / Hash 在 [Telegram 官网](https://core.telegram.org/obtaining_api_id) 申请（申请报错时可尝试 `cloudflare warp` 代理）。
+
+> sqmusic 联动（`/music`）：需同时设置 `SQMUSIC_URL` 与 `MUSIC_DIR`。用法：向机器人发送 `/music 晴天 周杰伦`，按提示回复数字选择歌曲，机器人会调 sqmusic 搜索下载（默认酷我 `kw` 源，免费曲目直接可下），下载完成后把音频文件发回并把歌曲同步到音乐库（Emby 兼容目录 `音乐库/歌手/专辑/`）。
 
 ## 部署
 
@@ -121,16 +128,34 @@ services:
     volumes:
       - ${TELEGRAM_DATA_DIR}:/app/data
       - ${APP_DATA_DIR}/db:/app/db
+    networks:
+      - default
+      - sqmusic        # 仅启用 /music 联动时需要（外部网络，指向 sqmusic 的 compose 网络）
     stop_signal: SIGINT
     command: run -d /app/data -l http://server:8081
+
+networks:
+  sqmusic:
+    external: true
+    name: sqmusic_sq-app-network
 ```
+
+启用 `/music` 联动时，把 sqmusic 的音乐库挂载给 bot 容器（只读即可），并在 `.env` 配置 sqmusic 连接信息：
 
 `.env` 额外配置：
 
 ```
 TELEGRAM_DATA_DIR=/path/to/data
 APP_DATA_DIR=/path/to/app-data
+
+# 启用 /music 联动（可选）
+SQMUSIC_URL=http://sqmusic_main:8099
+SQMUSIC_USER=admin
+SQMUSIC_PASS=admin
+MUSIC_DIR=/music
 ```
+
+同时给 bot 服务追加音乐库挂载：`- /vol1/1000/音频/音乐:/music:ro`（路径按你的 sqmusic 实际音乐目录调整）。
 
 启动 / 更新：
 

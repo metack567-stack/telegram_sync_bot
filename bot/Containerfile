@@ -1,8 +1,9 @@
 # rust >= 1.88: let-chains in if/let expressions (used in handler/transport/storage)
 FROM docker.io/rust:1.88.0-alpine AS bot_builder
 
+# build-base: cc/gcc needed by ring (reqwest rustls-tls)
 RUN apk update \
-    && apk add --no-cache --purge libc-dev openssl-dev openssl-libs-static pkgconfig
+    && apk add --no-cache --purge libc-dev openssl-dev openssl-libs-static pkgconfig build-base
 
 WORKDIR /work
 

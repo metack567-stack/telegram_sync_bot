@@ -1,14 +1,15 @@
 use crate::handler::handler;
 use crate::{
     context::{Context, ContextInner},
+    sqm::SqmusicClient,
     storage::MyStorage,
     utils::gen_key,
 };
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Parser, Subcommand};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::AtomicBool;
-use std::{collections::HashSet, path::PathBuf, process::Stdio, sync::Arc};
+use std::{collections::HashMap, collections::HashSet, path::PathBuf, process::Stdio, sync::Arc};
 use teloxide::{Bot, types::{BotCommand, UserId}};
 use teloxide::{dispatching::dialogue::InMemStorage, prelude::*};
 use tokio::fs;
@@ -158,6 +159,33 @@ impl Cli {
                             std::fs::create_dir_all(&output)?;
                             output
                         },
+                        sqmusic: {
+                            match std::env::var("SQMUSIC_URL") {
+                                Ok(url) if !url.trim().is_empty() => {
+                                    let user = std::env::var("SQMUSIC_USER")
+                                        .unwrap_or_else(|_| "admin".to_string());
+                                    let pass = std::env::var("SQMUSIC_PASS")
+                                        .unwrap_or_else(|_| "admin".to_string());
+                                    info!(">> INIT: sqmusic enabled: {}", url);
+                                    Some(SqmusicClient::new(url, user, pass))
+                                }
+                                _ => {
+                                    info!(">> INIT: sqmusic disabled (SQMUSIC_URL unset)");
+                                    None
+                                }
+                            }
+                        },
+                        music_dir: {
+                            let dir = std::env::var("MUSIC_DIR")
+                                .map(std::path::PathBuf::from)
+                                .ok()
+                                .filter(|p| !p.as_os_str().is_empty());
+                            if let Some(dir) = &dir {
+                                info!(">> INIT: music dir: {}", dir.display());
+                            }
+                            dir
+                        },
+                        music_pending: Mutex::new(HashMap::new()),
                         fav_score_limit,
                         dislike_score_limit,
                         hard_link: AtomicBool::new(true), // ensure try hard link once
@@ -177,6 +205,7 @@ impl Cli {
                         BotCommand::new("toggle", "Switch paused/active state, renew to rotate key"),
                         BotCommand::new("bypasskey", "Print bypass key"),
                         BotCommand::new("clear", "Clear all downloaded files in normal directory"),
+                        BotCommand::new("music", "Search and download music via sqmusic, e.g. /music 晴天"),
                     ];
                     match bot.set_my_commands(commands).await {
                         Ok(_) => info!(">> INIT: command menu registered"),
@@ -252,6 +281,9 @@ impl Cli {
                         },
                         fav_score_limit: 0,
                         dislike_score_limit: 0,
+                        sqmusic: None,
+                        music_dir: None,
+                        music_pending: Mutex::new(HashMap::new()),
                         hard_link: AtomicBool::new(true), // ensure try hard link once
                     }),
                 };

@@ -1,9 +1,11 @@
 use core::fmt;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::ops::Deref;
 use std::sync::atomic::AtomicBool;
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
-use teloxide::types::UserId;
+use std::{collections::HashMap, collections::HashSet, path::PathBuf, sync::Arc};
+use teloxide::types::{ChatId, UserId};
+
+use crate::sqm::{PendingMusic, SqmusicClient};
 
 #[derive(Debug, Clone)]
 pub struct Context {
@@ -30,6 +32,13 @@ pub struct ContextInner {
     // root of the local telegram-bot-api cache, seen from this container (env SERVER_CACHE_DIR)
     pub server_cache_dir: PathBuf,
 
+    // sqmusic integration (env SQMUSIC_URL): None = feature disabled
+    pub sqmusic: Option<Arc<SqmusicClient>>,
+    // where sqmusic writes music files, seen from this container (env MUSIC_DIR)
+    pub music_dir: Option<PathBuf>,
+    // chat_id -> songs waiting for user to pick (expires in 60s)
+    pub music_pending: Mutex<HashMap<ChatId, PendingMusic>>,
+
     pub hard_link: AtomicBool,
 }
 
@@ -46,6 +55,8 @@ impl fmt::Display for Context {
             .field("output_dir", &self.data_dir.canonicalize().ok())
             .field("db_dir", &self.db_dir.canonicalize().ok())
             .field("server_cache_dir", &self.server_cache_dir.canonicalize().ok())
+            .field("sqmusic", &self.sqmusic.as_ref().map(|_| "enabled"))
+            .field("music_dir", &self.music_dir)
             .finish()
     }
 }

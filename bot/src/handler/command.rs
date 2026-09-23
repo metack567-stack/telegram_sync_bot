@@ -1,6 +1,12 @@
 use super::MyDialogue;
-use crate::{context::Context, storage::MyStorage, utils::gen_key};
+use crate::{
+    context::Context,
+    sqm::PendingMusic,
+    storage::MyStorage,
+    utils::gen_key,
+};
 use anyhow::Result;
+use std::time::Instant;
 use teloxide::{
     Bot,
     dispatching::UpdateHandler,
@@ -11,7 +17,7 @@ use teloxide::{
     types::{InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MediaText, Message, MessageCommon, MessageKind},
     utils::command::BotCommands as _,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(BotCommands, Clone)]
 #[command(
@@ -31,6 +37,8 @@ enum Command {
     BypassKey,
     #[command(description = "Clear all downloaded files in normal directory.")]
     Clear,
+    #[command(description = "Search and download music via sqmusic, e.g. /music 晴天")]
+    Music(String),
 }
 
 pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
@@ -107,6 +115,71 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                 let mut req = bot.send_message(msg.chat.id, text);
                 req.payload_mut().reply_markup = Some(teloxide::types::ReplyMarkup::InlineKeyboard(keyboard));
                 req.await?;
+                Ok(())
+            },
+        ))
+        .branch(case![Command::Music(keyword)].endpoint(
+            async |bot: Bot, msg: Message, ctx: Context, keyword: String| {
+                let Some(sqm) = &ctx.sqmusic else {
+                    bot.send_message(
+                        msg.chat.id,
+                        "sqmusic 联动未启用（服务端未配置 SQMUSIC_URL）",
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                let keyword = keyword.trim();
+                if keyword.is_empty() {
+                    bot.send_message(msg.chat.id, "用法：/music <歌名> [歌手]，例如 /music 晴天 周杰伦")
+                        .await?;
+                    return Ok(());
+                }
+                // search with kw first (most songs free to download)
+                let songs = match sqm.search("kw", keyword, 5).await {
+                    Ok(s) if !s.is_empty() => s,
+                    Ok(_) => {
+                        bot.send_message(msg.chat.id, format!("未找到「{}」相关歌曲", keyword))
+                            .await?;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(">> SQMUSIC: search failed: {}", e);
+                        bot.send_message(msg.chat.id, format!("搜索失败：{}", e)).await?;
+                        return Ok(());
+                    }
+                };
+                let top = songs.into_iter().take(5).collect::<Vec<_>>();
+                ctx.music_pending.lock().insert(
+                    msg.chat.id,
+                    PendingMusic {
+                        songs: top.clone(),
+                        created: Instant::now(),
+                    },
+                );
+                let mut text = format!(
+                    "🎵 搜索到「{}」相关歌曲，回复数字选择（60 秒内有效）：\n",
+                    keyword
+                );
+                for (i, s) in top.iter().enumerate() {
+                    let artist = if s.artistName.is_empty() {
+                        "未知歌手".to_string()
+                    } else {
+                        s.artistName.join("/")
+                    };
+                    let album = s.albumName.clone().unwrap_or_else(|| "未知专辑".to_string());
+                    let br = crate::sqm::pick_br_type(&s.brTypes)
+                        .map(|b| b.replace('_', " "))
+                        .unwrap_or_else(|| "自动".to_string());
+                    text.push_str(&format!(
+                        "{}. {} - {}《{}》〔{}〕\n",
+                        i + 1,
+                        s.name,
+                        artist,
+                        album,
+                        br
+                    ));
+                }
+                bot.send_message(msg.chat.id, text).await?;
                 Ok(())
             },
         ))

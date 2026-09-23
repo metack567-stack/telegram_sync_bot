@@ -25,6 +25,7 @@ Note: In this file, do not use the hard wrap in the middle of a sentence for com
 - 新增 `DELETE_UNKNOWN_MESSAGES` 环境变量：对未跟踪消息点表情时删除该消息，默认关闭（保护共享频道中机器人未管理的消息）
 - 新增 `RESET_DB` 环境变量：调试用，设置后启动时重建数据库表（默认只迁移，不再清库）
 - photo caption 文件名截断到 80 字符，避免超长文件名
+- 新增 sqmusic 音乐联动 `/music <歌名>` 命令：搜索（默认酷我源）→ 回复数字选歌 → sqmusic 后台下载到音乐库（Emby 兼容目录）→ 音频文件回传 Telegram（`SQMUSIC_URL` / `SQMUSIC_USER` / `SQMUSIC_PASS` / `MUSIC_DIR` 环境变量控制）
 
 ### Changed
 

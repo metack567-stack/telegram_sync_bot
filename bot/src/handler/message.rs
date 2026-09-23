@@ -3,13 +3,20 @@ use super::{
     command::cmd_handler,
     utils::{TryMultipleTimes, set_emoji},
 };
-use crate::storage::{ChatState, FileState, MyStorage, TransportState};
+use crate::{
+    context::Context,
+    sqm::{MusicRecord, SqmusicClient},
+    storage::{ChatState, FileState, MyStorage, TransportState},
+};
 use anyhow::Result;
+use std::path::PathBuf;
+use std::sync::Arc;
 use teloxide::{
     Bot,
     dispatching::{UpdateFilterExt as _, UpdateHandler},
     prelude::Requester as _,
-    types::{InputFile, MediaKind, Message, MessageKind, Update},
+    requests::HasPayload as _,
+    types::{ChatId, InputFile, MediaKind, MediaText, Message, MessageKind, Update},
 };
 use tracing::{info, instrument, warn};
 
@@ -26,13 +33,56 @@ pub fn channel_post_handler() -> UpdateHandler<anyhow::Error> {
 }
 
 #[instrument(level = "debug", skip_all, fields(chat_id=%msg.chat.id, msg_id=%msg.id))]
-async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage) -> Result<()> {
+async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage, ctx: Context) -> Result<()> {
     let (chat_id, mut msg_id) = (msg.chat.id, msg.id);
     let chat_state = storage.get_chat_state(chat_id).await?;
     if chat_state == ChatState::Paused {
         // silently ignore while paused, avoid replying to every message
         dialogue.exit().await?;
         return Ok(());
+    }
+    // sqmusic: user picks a song number right after /music
+    if let Some(sqm) = &ctx.sqmusic
+        && let Some(music_dir) = &ctx.music_dir
+        && let MessageKind::Common(common) = &msg.kind
+        && let MediaKind::Text(MediaText { text, .. }) = &common.media_kind
+    {
+        let pending = ctx.music_pending.lock().get(&chat_id).cloned();
+        if let Some(pending) = pending {
+            if pending.expired() {
+                ctx.music_pending.lock().remove(&chat_id);
+            } else if let Ok(n) = text.trim().parse::<usize>() {
+                let len = pending.songs.len();
+                if (1..=len).contains(&n) {
+                    ctx.music_pending.lock().remove(&chat_id);
+                    let song = pending.songs[n - 1].clone();
+                    let br = crate::sqm::pick_br_type(&song.brTypes)
+                        .unwrap_or_else(|| song.brTypes.first().cloned().unwrap_or_default());
+                    let artist = if song.artistName.is_empty() {
+                        "未知歌手".to_string()
+                    } else {
+                        song.artistName.join("/")
+                    };
+                    bot.send_message(
+                        chat_id,
+                        format!("⬇️ 开始下载：{} - {}〔{}〕", song.name, artist, br.replace('_', " ")),
+                    )
+                    .await?;
+                    let sqm = sqm.clone();
+                    let music_dir = music_dir.clone();
+                    let bot = bot.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = download_and_send(bot, sqm, music_dir, chat_id, song, br).await {
+                            warn!(">> SQMUSIC: download flow failed: {}", e);
+                        }
+                    });
+                    return Ok(());
+                }
+                bot.send_message(chat_id, format!("请输入 1-{} 选择歌曲，或重新 /music 搜索", len))
+                    .await?;
+                return Ok(());
+            }
+        }
     }
     if let MessageKind::Common(common_msg) = msg.kind
         && let Some((file_id, file_name)) = match common_msg.media_kind {
@@ -205,5 +255,38 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
                 }
             });
         }
+    Ok(())
+}
+
+/// sqmusic 下载流程：提交下载 -> 等待任务完成 -> 在音乐目录找文件 -> 发回 Telegram。
+async fn download_and_send(
+    bot: Bot,
+    sqm: Arc<SqmusicClient>,
+    music_dir: PathBuf,
+    chat_id: ChatId,
+    song: MusicRecord,
+    br: String,
+) -> Result<()> {
+    sqm.download_song(&song, &br).await?;
+    let task = sqm.wait_task(&song.id, 90).await?;
+    let file = crate::sqm::find_latest_audio(&music_dir).await?;
+    let title = task.downloadMusicname.clone().unwrap_or_else(|| song.name.clone());
+    let performer = task
+        .downloadArtistname
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            if song.artistName.is_empty() {
+                "未知歌手".to_string()
+            } else {
+                song.artistName.join("/")
+            }
+        });
+    info!(">> SQMUSIC: send audio {} to {}", file.display(), chat_id);
+    let mut req = bot.send_audio(chat_id, InputFile::file(&file));
+    req.payload_mut().title = Some(title);
+    req.payload_mut().performer = Some(performer);
+    req.await?;
+    bot.send_message(chat_id, "✅ 下载完成，已同步到音乐库").await?;
     Ok(())
 }
