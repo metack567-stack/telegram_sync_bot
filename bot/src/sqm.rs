@@ -282,11 +282,15 @@ pub fn pick_br_type(br_types: &[String]) -> Option<String> {
     br_types.first().cloned()
 }
 
-/// 在音乐目录下找最近 5 分钟内新增的音频文件（取最新）。
-/// 目录不存在或没有新文件时返回错误。
-pub async fn find_latest_audio(music_dir: &PathBuf) -> Result<PathBuf> {
+/// 在音乐目录下找刚下载（或已存在）的音频文件，取最新。
+/// sqmusic 对库中已存在的歌会跳过下载（任务仍返回 success），所以先按任务信息
+/// （歌名 + 歌手）在音乐库全局匹配已有文件，命中即返回；否则回退到 5 分钟内新增文件。
+pub async fn find_latest_audio(music_dir: &PathBuf, task: &TaskRecord) -> Result<PathBuf> {
     if !music_dir.is_dir() {
         bail!("音乐目录不存在：{}", music_dir.display());
+    }
+    if let Some(p) = find_by_task(music_dir, task) {
+        return Ok(p);
     }
     let now = SystemTime::now();
     let window = Duration::from_secs(300);
@@ -318,7 +322,41 @@ pub async fn find_latest_audio(music_dir: &PathBuf) -> Result<PathBuf> {
         }
     }
     best.map(|(_, p)| p)
-        .ok_or_else(|| anyhow!("音乐目录里未找到刚下载的音频文件（5 分钟内）"))
+        .ok_or_else(|| anyhow!("音乐目录里未找到歌曲文件（歌名+歌手均未匹配到）"))
+}
+
+/// 按任务记录的歌名/歌手在音乐库中匹配已有音频文件，取最新。找不到返回 None。
+fn find_by_task(music_dir: &PathBuf, task: &TaskRecord) -> Option<PathBuf> {
+    let song = task.downloadMusicname.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let artist = task
+        .downloadArtistname
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let (Some(song), Some(artist)) = (song, artist) else {
+        return None;
+    };
+    let song_l = song.to_lowercase();
+    let artist_l = artist.to_lowercase();
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for entry in walkdir::WalkDir::new(music_dir)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if !is_audio_ext(&name) || !name.contains(&song_l) || !name.contains(&artist_l) {
+            continue;
+        }
+        let modified = entry.metadata().ok()?.modified().ok()?;
+        if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+            best = Some((modified, entry.into_path()));
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 fn is_audio_ext(name: &str) -> bool {

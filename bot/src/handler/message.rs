@@ -269,7 +269,7 @@ async fn download_and_send(
 ) -> Result<()> {
     sqm.download_song(&song, &br).await?;
     let task = sqm.wait_task(&song.id, 90).await?;
-    let file = crate::sqm::find_latest_audio(&music_dir).await?;
+    let file = crate::sqm::find_latest_audio(&music_dir, &task).await?;
     let title = task.downloadMusicname.clone().unwrap_or_else(|| song.name.clone());
     let performer = task
         .downloadArtistname
