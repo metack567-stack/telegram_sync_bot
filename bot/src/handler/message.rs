@@ -42,8 +42,8 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
         return Ok(());
     }
     // sqmusic: user picks a song number right after /music
-    if let Some(sqm) = &ctx.sqmusic
-        && let Some(music_dir) = &ctx.music_dir
+    if ctx.sqmusic.is_some()
+        && ctx.music_dir.is_some()
         && let MessageKind::Common(common) = &msg.kind
         && let MediaKind::Text(MediaText { text, .. }) = &common.media_kind
     {
@@ -54,29 +54,24 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
             } else if let Ok(n) = text.trim().parse::<usize>() {
                 let len = pending.songs.len();
                 if (1..=len).contains(&n) {
-                    ctx.music_pending.lock().remove(&chat_id);
                     let song = pending.songs[n - 1].clone();
-                    let pref = pending.pref.clone();
-                    let br = crate::sqm::pick_br_type_with_pref(&song.brTypes, pref.as_deref())
-                        .unwrap_or_else(|| song.brTypes.first().cloned().unwrap_or_default());
                     let artist = if song.artistName.is_empty() {
                         "未知歌手".to_string()
                     } else {
                         song.artistName.join("/")
                     };
-                    bot.send_message(
+                    // 进入"选音质"阶段：记录选中歌曲，发可点击的音质按钮（点击后才下载）
+                    let mut p = pending.clone();
+                    p.chosen = Some(n - 1);
+                    ctx.music_pending.lock().insert(chat_id, p);
+                    let kb = crate::sqm::quality_keyboard(n - 1, &song.brTypes);
+                    let mut req = bot.send_message(
                         chat_id,
-                        format!("⬇️ 开始下载：{} - {}〔{}〕", song.name, artist, br.replace('_', " ")),
-                    )
-                    .await?;
-                    let sqm = sqm.clone();
-                    let music_dir = music_dir.clone();
-                    let bot = bot.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = download_and_send(bot, sqm, music_dir, chat_id, song, br).await {
-                            warn!(">> SQMUSIC: download flow failed: {}", e);
-                        }
-                    });
+                        format!("🎚️ 请选择「{} - {}」的音质：", song.name, artist),
+                    );
+                    req.payload_mut().reply_markup =
+                        Some(teloxide::types::ReplyMarkup::InlineKeyboard(kb));
+                    req.await?;
                     return Ok(());
                 }
                 bot.send_message(chat_id, format!("请输入 1-{} 选择歌曲，或重新 /music 搜索", len))
@@ -261,7 +256,7 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
 
 /// sqmusic 下载流程：提交下载 -> 等待任务完成 -> 在音乐目录找文件 -> 发回 Telegram。
 /// 首选源失败时自动用歌名在 qq/mg 源重试一次；全部失败时通知用户。
-async fn download_and_send(
+pub(crate) async fn download_and_send(
     bot: Bot,
     sqm: Arc<SqmusicClient>,
     music_dir: PathBuf,

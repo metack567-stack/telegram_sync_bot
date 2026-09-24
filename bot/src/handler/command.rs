@@ -159,6 +159,7 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                         songs: top.clone(),
                         created: Instant::now(),
                         pref: pref.clone(),
+                        chosen: None,
                     },
                 );
                 let mut text = format!(

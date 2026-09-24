@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use tracing::{info, warn};
 
 /// 搜索结果中的一首歌（对应 sqmusic `/api/music/searchSong` 返回的 records[]）。
@@ -46,13 +47,15 @@ pub struct TaskRecord {
     pub downloadBrType: Option<String>,
 }
 
-/// 用户等待选歌的临时状态。
+/// 用户等待选歌/选音质的临时状态。
 #[derive(Debug, Clone)]
 pub struct PendingMusic {
     pub songs: Vec<MusicRecord>,
     pub created: Instant,
     /// 用户指定的音质偏好（如 "flac"/"320"），None 表示自动。
     pub pref: Option<String>,
+    /// 已选中的歌曲下标（进入选音质阶段）；None 表示还在选歌阶段。
+    pub chosen: Option<usize>,
 }
 
 impl PendingMusic {
@@ -293,6 +296,63 @@ pub fn pick_br_type_with_pref(br_types: &[String], pref: Option<&str>) -> Option
         }
     }
     pick_br_type(br_types)
+}
+
+/// 把 brType（如 "KW_FLAC_2000"）转成可读的按钮文案（如 "无损 FLAC 2000"）。
+pub fn humanize_br(br: &str) -> String {
+    let lower = br.to_ascii_lowercase();
+    let format = if lower.contains("flac") {
+        "无损 FLAC"
+    } else if lower.contains("ape") {
+        "无损 APE"
+    } else if lower.contains("wav") {
+        "无损 WAV"
+    } else if lower.contains("m4a") || lower.contains("aac") {
+        "AAC/M4A"
+    } else if lower.contains("mp3") {
+        "MP3"
+    } else {
+        br
+    };
+    let rate = if lower.contains("2000") {
+        "2000"
+    } else if lower.contains("320") {
+        "320"
+    } else if lower.contains("256") {
+        "256"
+    } else if lower.contains("128") {
+        "128"
+    } else {
+        ""
+    };
+    if rate.is_empty() {
+        format.to_string()
+    } else {
+        format!("{} {}", format, rate)
+    }
+}
+
+/// 为一首歌生成音质选择的内联键盘：该歌可用码率各一个按钮，外加"自动"。
+/// 回调数据格式：music:dl:<song_idx>:<brType>，brType 为 "auto" 表示自动选。
+pub fn quality_keyboard(song_idx: usize, br_types: &[String]) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for bt in br_types {
+        if seen.contains(bt) {
+            continue;
+        }
+        seen.push(bt.clone());
+        let label = humanize_br(bt);
+        rows.push(vec![InlineKeyboardButton::callback(
+            label,
+            format!("music:dl:{}:{}", song_idx, bt),
+        )]);
+    }
+    rows.push(vec![InlineKeyboardButton::callback(
+        "⚙️ 自动",
+        format!("music:dl:{}:auto", song_idx),
+    )]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 /// 在音乐目录下找刚下载（或已存在）的音频文件，取最新。
