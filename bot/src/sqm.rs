@@ -355,19 +355,51 @@ pub fn quality_keyboard(song_idx: usize, br_types: &[String]) -> InlineKeyboardM
     InlineKeyboardMarkup::new(rows)
 }
 
-/// 在音乐目录下找刚下载（或已存在）的音频文件，取最新。
+/// 找到的音频文件 + 是否与期望格式一致。
+#[derive(Debug, Clone)]
+pub struct FoundAudio {
+    pub path: PathBuf,
+    pub format_ok: bool,
+}
+
+/// 由 brType（如 "KW_FLAC_2000"）推导期望的音频扩展名；无法识别时返回 None。
+pub fn ext_from_br(br: &str) -> Option<&'static str> {
+    let lower = br.to_ascii_lowercase();
+    if lower.contains("flac") {
+        Some("flac")
+    } else if lower.contains("ape") {
+        Some("ape")
+    } else if lower.contains("wav") {
+        Some("wav")
+    } else if lower.contains("m4a") || lower.contains("aac") {
+        Some("m4a")
+    } else if lower.contains("mp3") {
+        Some("mp3")
+    } else {
+        None
+    }
+}
+
+/// 在音乐目录下找刚下载（或已存在）的音频文件。
 /// sqmusic 对库中已存在的歌会跳过下载（任务仍返回 success），所以先按任务信息
 /// （歌名 + 歌手）在音乐库全局匹配已有文件，命中即返回；否则回退到 5 分钟内新增文件。
-pub async fn find_latest_audio(music_dir: &PathBuf, task: &TaskRecord) -> Result<PathBuf> {
+/// `prefer_ext`（如 "flac"）指定时优先返回该格式；找不到同格式才回退其他格式
+/// （format_ok=false，调用方应提示用户）。
+pub async fn find_latest_audio(
+    music_dir: &PathBuf,
+    task: &TaskRecord,
+    prefer_ext: Option<&str>,
+) -> Result<FoundAudio> {
     if !music_dir.is_dir() {
         bail!("音乐目录不存在：{}", music_dir.display());
     }
-    if let Some(p) = find_by_task(music_dir, task) {
-        return Ok(p);
+    if let Some(f) = find_by_task(music_dir, task, prefer_ext) {
+        return Ok(f);
     }
     let now = SystemTime::now();
     let window = Duration::from_secs(300);
-    let mut best: Option<(SystemTime, PathBuf)> = None;
+    let mut best_pref: Option<(SystemTime, PathBuf)> = None;
+    let mut best_fallback: Option<(SystemTime, PathBuf)> = None;
     for entry in walkdir::WalkDir::new(music_dir)
         .max_depth(4)
         .into_iter()
@@ -388,36 +420,86 @@ pub async fn find_latest_audio(music_dir: &PathBuf, task: &TaskRecord) -> Result
             Ok(t) => t,
             Err(_) => continue,
         };
-        if now.duration_since(modified).map(|d| d <= window).unwrap_or(false)
-            && best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true)
-        {
-            best = Some((modified, entry.into_path()));
+        if !now.duration_since(modified).map(|d| d <= window).unwrap_or(false) {
+            continue;
+        }
+        let ext_ok = prefer_ext.is_none_or(|e| name.ends_with(e));
+        let slot = if ext_ok {
+            &mut best_pref
+        } else {
+            &mut best_fallback
+        };
+        if slot.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+            *slot = Some((modified, entry.into_path()));
         }
     }
-    best.map(|(_, p)| p)
-        .ok_or_else(|| anyhow!("音乐目录里未找到歌曲文件（歌名+歌手均未匹配到）"))
+    if let Some((_, p)) = best_pref {
+        Ok(FoundAudio { path: p, format_ok: true })
+    } else if let Some((_, p)) = best_fallback {
+        Ok(FoundAudio { path: p, format_ok: false })
+    } else {
+        bail!("音乐目录里未找到歌曲文件（歌名+歌手均未匹配到）")
+    }
 }
 
-/// 按任务记录的歌名/歌手在音乐库中匹配已有音频文件，取最新。找不到返回 None。
-/// 多级匹配，容忍文件名差异：
-/// 1) 文件名分词（按 `-`/`_`/空格/括号等拆分）后存在一段与歌名完全相等 → 命中；
-/// 2) 文件名同时包含歌名和歌手 → 命中；
-/// 3) 歌名较长（>=3 字符）且文件名包含歌名 → 命中（短歌名如“晴天”只允许前两级，避免误配“晴天娃娃”）。
-fn find_by_task(music_dir: &PathBuf, task: &TaskRecord) -> Option<PathBuf> {
+/// 按歌名/歌手在音乐库中匹配已有音频文件（下载前预查用）。找不到返回 None。
+/// `prefer_ext` 指定时优先返回该格式，否则回退其他格式（format_ok=false）。
+pub fn find_in_library(
+    music_dir: &PathBuf,
+    song: &MusicRecord,
+    prefer_ext: Option<&str>,
+) -> Option<FoundAudio> {
+    let song_l = song.name.trim().to_lowercase();
+    if song_l.is_empty() {
+        return None;
+    }
+    let artist_l = if song.artistName.is_empty() {
+        None
+    } else {
+        Some(song.artistName.join(" ").to_lowercase())
+    };
+    match_in_library(music_dir, &song_l, artist_l.as_deref(), prefer_ext)
+}
+
+/// 按任务记录的歌名/歌手在音乐库中匹配已有音频文件。找不到返回 None。
+fn find_by_task(
+    music_dir: &PathBuf,
+    task: &TaskRecord,
+    prefer_ext: Option<&str>,
+) -> Option<FoundAudio> {
     let song = task
         .downloadMusicname
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())?;
-    let song_l = song.to_lowercase();
     let artist = task
         .downloadArtistname
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
-    let artist_l = artist.map(|s| s.to_lowercase());
+    match_in_library(
+        music_dir,
+        &song.to_lowercase(),
+        artist.map(|a| a.to_lowercase()).as_deref(),
+        prefer_ext,
+    )
+}
+
+/// 在音乐库中按歌名/歌手匹配已有音频文件的核心逻辑。
+/// 多级匹配，容忍文件名差异：
+/// 1) 文件名分词（按 `-`/`_`/空格/括号等拆分）后存在一段与歌名完全相等 → 命中；
+/// 2) 文件名同时包含歌名和歌手 → 命中；
+/// 3) 歌名较长（>=3 字符）且文件名包含歌名 → 命中（短歌名如“晴天”只允许前两级，避免误配“晴天娃娃”）。
+/// `prefer_ext` 指定时优先返回该格式，否则回退其他格式（format_ok=false）。
+fn match_in_library(
+    music_dir: &PathBuf,
+    song_l: &str,
+    artist_l: Option<&str>,
+    prefer_ext: Option<&str>,
+) -> Option<FoundAudio> {
     let song_len = song_l.chars().count();
-    let mut best: Option<(SystemTime, PathBuf)> = None;
+    let mut best_pref: Option<(SystemTime, PathBuf)> = None;
+    let mut best_fallback: Option<(SystemTime, PathBuf)> = None;
     for entry in walkdir::WalkDir::new(music_dir)
         .max_depth(4)
         .into_iter()
@@ -436,10 +518,8 @@ fn find_by_task(music_dir: &PathBuf, task: &TaskRecord) -> Option<PathBuf> {
             .filter(|t| !t.is_empty())
             .collect();
         let token_exact = tokens.iter().any(|t| *t == song_l);
-        let contains_song = stem.contains(&song_l);
-        let contains_artist = artist_l
-            .as_ref()
-            .is_some_and(|a| stem.contains(a.as_str()));
+        let contains_song = stem.contains(song_l);
+        let contains_artist = artist_l.is_some_and(|a| stem.contains(a));
         let matched = token_exact
             || (contains_song && contains_artist)
             || (contains_song && song_len >= 3);
@@ -447,11 +527,23 @@ fn find_by_task(music_dir: &PathBuf, task: &TaskRecord) -> Option<PathBuf> {
             continue;
         }
         let modified = entry.metadata().ok()?.modified().ok()?;
-        if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
-            best = Some((modified, entry.into_path()));
+        let ext_ok = prefer_ext.is_none_or(|e| name.ends_with(e));
+        let slot = if ext_ok {
+            &mut best_pref
+        } else {
+            &mut best_fallback
+        };
+        if slot.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+            *slot = Some((modified, entry.into_path()));
         }
     }
-    best.map(|(_, p)| p)
+    if let Some((_, p)) = best_pref {
+        Some(FoundAudio { path: p, format_ok: true })
+    } else if let Some((_, p)) = best_fallback {
+        Some(FoundAudio { path: p, format_ok: false })
+    } else {
+        None
+    }
 }
 
 /// 去掉文件名末尾的音频扩展名。

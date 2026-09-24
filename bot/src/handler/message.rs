@@ -308,7 +308,27 @@ pub(crate) async fn download_and_send(
     Ok(())
 }
 
-/// 单源下载尝试：提交下载 -> 等待任务 -> 找文件 -> 发回音频 + 完成消息。
+/// 发回音频文件（带标题/歌手），返回文件名。失败冒泡给调用方处理。
+async fn send_audio_with_title(
+    bot: &Bot,
+    chat_id: ChatId,
+    file: &PathBuf,
+    title: String,
+    performer: String,
+) -> Result<String> {
+    info!(">> SQMUSIC: send audio {} to {}", file.display(), chat_id);
+    let mut req = bot.send_audio(chat_id, InputFile::file(file));
+    req.payload_mut().title = Some(title);
+    req.payload_mut().performer = Some(performer);
+    req.await?;
+    Ok(file
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default())
+}
+
+/// 单源下载尝试：预查音乐库（已有则直接返回，不重复下载）-> 提交下载 -> 等待任务
+/// -> 找文件 -> 发回音频 + 完成消息。
 async fn try_download_and_send(
     bot: &Bot,
     sqm: &Arc<SqmusicClient>,
@@ -317,9 +337,44 @@ async fn try_download_and_send(
     song: &MusicRecord,
     br: &str,
 ) -> Result<()> {
+    let prefer_ext = crate::sqm::ext_from_br(br);
+    // 预查：音乐库已有该歌（sqmusic 判重会跳过下载），直接发回已有文件
+    if let Some(found) = crate::sqm::find_in_library(music_dir, song, prefer_ext) {
+        let title = song.name.clone();
+        let performer = if song.artistName.is_empty() {
+            "未知歌手".to_string()
+        } else {
+            song.artistName.join("/")
+        };
+        let fname = send_audio_with_title(bot, chat_id, &found.path, title, performer).await?;
+        if found.format_ok {
+            bot.send_message(
+                chat_id,
+                format!(
+                    "✅ 音乐库已有该歌（{}〔{}〕），未重复下载",
+                    fname,
+                    br.replace('_', " ")
+                ),
+            )
+            .await?;
+        } else {
+            let want = prefer_ext.unwrap_or("该格式");
+            bot.send_message(
+                chat_id,
+                format!(
+                    "⚠️ 音乐库已有该歌（{}），但不是 {} 格式；sqmusic 判定重复会跳过下载。如需 {} 请先在音乐库删除旧文件再试",
+                    fname, want, want
+                ),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+    // 未命中：正常下载
     sqm.download_song(song, br).await?;
     let task = sqm.wait_task(&song.id, 90).await?;
-    let file = crate::sqm::find_latest_audio(music_dir, &task).await?;
+    let found = crate::sqm::find_latest_audio(music_dir, &task, prefer_ext).await?;
+    let file = found.path;
     let title = task
         .downloadMusicname
         .clone()
@@ -335,16 +390,23 @@ async fn try_download_and_send(
                 song.artistName.join("/")
             }
         });
-    info!(">> SQMUSIC: send audio {} to {}", file.display(), chat_id);
-    let mut req = bot.send_audio(chat_id, InputFile::file(&file));
-    req.payload_mut().title = Some(title);
-    req.payload_mut().performer = Some(performer);
-    req.await?;
-    let fname = file.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-    bot.send_message(
-        chat_id,
-        format!("✅ 下载完成：{}〔{}〕，已同步到音乐库", fname, br.replace('_', " ")),
-    )
-    .await?;
+    let fname = send_audio_with_title(bot, chat_id, &file, title, performer).await?;
+    if found.format_ok {
+        bot.send_message(
+            chat_id,
+            format!("✅ 下载完成：{}〔{}〕，已同步到音乐库", fname, br.replace('_', " ")),
+        )
+        .await?;
+    } else {
+        let want = prefer_ext.unwrap_or("该格式");
+        bot.send_message(
+            chat_id,
+            format!(
+                "⚠️ 音乐库已存在该歌（{}），但不是 {} 格式；sqmusic 判定重复已跳过下载，已返回现有文件。如需 {} 请先在音乐库删除旧文件再试",
+                fname, want, want
+            ),
+        )
+        .await?;
+    }
     Ok(())
 }
