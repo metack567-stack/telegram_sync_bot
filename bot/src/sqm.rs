@@ -326,18 +326,24 @@ pub async fn find_latest_audio(music_dir: &PathBuf, task: &TaskRecord) -> Result
 }
 
 /// 按任务记录的歌名/歌手在音乐库中匹配已有音频文件，取最新。找不到返回 None。
+/// 多级匹配，容忍文件名差异：
+/// 1) 文件名分词（按 `-`/`_`/空格/括号等拆分）后存在一段与歌名完全相等 → 命中；
+/// 2) 文件名同时包含歌名和歌手 → 命中；
+/// 3) 歌名较长（>=3 字符）且文件名包含歌名 → 命中（短歌名如“晴天”只允许前两级，避免误配“晴天娃娃”）。
 fn find_by_task(music_dir: &PathBuf, task: &TaskRecord) -> Option<PathBuf> {
-    let song = task.downloadMusicname.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let song = task
+        .downloadMusicname
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())?;
+    let song_l = song.to_lowercase();
     let artist = task
         .downloadArtistname
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
-    let (Some(song), Some(artist)) = (song, artist) else {
-        return None;
-    };
-    let song_l = song.to_lowercase();
-    let artist_l = artist.to_lowercase();
+    let artist_l = artist.map(|s| s.to_lowercase());
+    let song_len = song_l.chars().count();
     let mut best: Option<(SystemTime, PathBuf)> = None;
     for entry in walkdir::WalkDir::new(music_dir)
         .max_depth(4)
@@ -348,7 +354,23 @@ fn find_by_task(music_dir: &PathBuf, task: &TaskRecord) -> Option<PathBuf> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_lowercase();
-        if !is_audio_ext(&name) || !name.contains(&song_l) || !name.contains(&artist_l) {
+        if !is_audio_ext(&name) {
+            continue;
+        }
+        let stem = strip_audio_ext(&name);
+        let tokens: Vec<&str> = stem
+            .split(['-', '_', ' ', '.', '(', ')', '【', '】', '[', ']'])
+            .filter(|t| !t.is_empty())
+            .collect();
+        let token_exact = tokens.iter().any(|t| *t == song_l);
+        let contains_song = stem.contains(&song_l);
+        let contains_artist = artist_l
+            .as_ref()
+            .is_some_and(|a| stem.contains(a.as_str()));
+        let matched = token_exact
+            || (contains_song && contains_artist)
+            || (contains_song && song_len >= 3);
+        if !matched {
             continue;
         }
         let modified = entry.metadata().ok()?.modified().ok()?;
@@ -357,6 +379,17 @@ fn find_by_task(music_dir: &PathBuf, task: &TaskRecord) -> Option<PathBuf> {
         }
     }
     best.map(|(_, p)| p)
+}
+
+/// 去掉文件名末尾的音频扩展名。
+fn strip_audio_ext(name: &str) -> &str {
+    const EXTS: [&str; 8] = ["mp3", "flac", "m4a", "ape", "wav", "ogg", "aac", "opus"];
+    for e in EXTS {
+        if let Some(stem) = name.strip_suffix(e) {
+            return stem;
+        }
+    }
+    name
 }
 
 fn is_audio_ext(name: &str) -> bool {
