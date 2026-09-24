@@ -192,7 +192,14 @@ impl Cli {
                     }),
                 };
                 info!(">> INIT: {}", context);
-                let mut bot = Bot::from_env();
+                // 长超时 client：大文件（无损 flac 可达 50MB+）上传 Telegram 需要
+                // 数十秒，teloxide 默认约 17s 会超时导致 SendAudio 失败
+                let client = reqwest_v11::Client::builder()
+                    .timeout(std::time::Duration::from_secs(300))
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .context("failed to build tg http client")?;
+                let mut bot = Bot::from_env_with_client(client);
                 if let Some(url) = local_server_url {
                     bot = bot.set_api_url(url.parse().context("Failed to parse local server url")?);
                 }
