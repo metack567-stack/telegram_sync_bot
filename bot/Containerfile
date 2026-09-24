@@ -10,7 +10,10 @@ WORKDIR /work
 COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry cargo fetch
-RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/work/target cargo build --release && cp /work/target/release/telegram_sync_bot /work/telegram_sync_bot
+# 注意：刻意不使用 --mount=type=cache,target=/work/target 缓存编译产物。
+# 该 cache mount 曾导致 cargo 误判源码未变、跳过重编译，产出旧二进制。
+# 每次源码变化时全量编译（NAS 上约 6-7 分钟），保证镜像与源码一致。
+RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release && cp /work/target/release/telegram_sync_bot /work/telegram_sync_bot
 
 ########################################
 

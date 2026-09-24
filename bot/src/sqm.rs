@@ -51,6 +51,8 @@ pub struct TaskRecord {
 pub struct PendingMusic {
     pub songs: Vec<MusicRecord>,
     pub created: Instant,
+    /// 用户指定的音质偏好（如 "flac"/"320"），None 表示自动。
+    pub pref: Option<String>,
 }
 
 impl PendingMusic {
@@ -280,6 +282,17 @@ pub fn pick_br_type(br_types: &[String]) -> Option<String> {
         }
     }
     br_types.first().cloned()
+}
+
+/// 带用户偏好的码率选择：偏好（如 "flac"/"320"）命中则用之，否则回退到自动选择。
+pub fn pick_br_type_with_pref(br_types: &[String], pref: Option<&str>) -> Option<String> {
+    if let Some(pref) = pref {
+        let p = pref.to_ascii_lowercase();
+        if let Some(i) = br_types.iter().position(|b| b.to_ascii_lowercase().contains(&p)) {
+            return Some(br_types[i].clone());
+        }
+    }
+    pick_br_type(br_types)
 }
 
 /// 在音乐目录下找刚下载（或已存在）的音频文件，取最新。

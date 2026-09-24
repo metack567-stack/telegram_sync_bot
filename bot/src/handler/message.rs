@@ -56,7 +56,8 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
                 if (1..=len).contains(&n) {
                     ctx.music_pending.lock().remove(&chat_id);
                     let song = pending.songs[n - 1].clone();
-                    let br = crate::sqm::pick_br_type(&song.brTypes)
+                    let pref = pending.pref.clone();
+                    let br = crate::sqm::pick_br_type_with_pref(&song.brTypes, pref.as_deref())
                         .unwrap_or_else(|| song.brTypes.first().cloned().unwrap_or_default());
                     let artist = if song.artistName.is_empty() {
                         "未知歌手".to_string()
@@ -259,6 +260,7 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
 }
 
 /// sqmusic 下载流程：提交下载 -> 等待任务完成 -> 在音乐目录找文件 -> 发回 Telegram。
+/// 首选源失败时自动用歌名在 qq/mg 源重试一次；全部失败时通知用户。
 async fn download_and_send(
     bot: Bot,
     sqm: Arc<SqmusicClient>,
@@ -267,10 +269,66 @@ async fn download_and_send(
     song: MusicRecord,
     br: String,
 ) -> Result<()> {
-    sqm.download_song(&song, &br).await?;
+    let mut plugs = vec![song.plugName.clone()];
+    for p in ["qq", "mg"] {
+        if !plugs.iter().any(|x| x == p) {
+            plugs.push(p.to_string());
+        }
+    }
+    let mut last_err: Option<anyhow::Error> = None;
+    for (idx, plug) in plugs.iter().enumerate() {
+        let target = if idx == 0 {
+            song.clone()
+        } else {
+            // 换源：用歌名重新搜索，取第一条
+            match sqm.search(plug, &song.name, 3).await {
+                Ok(s) if !s.is_empty() => s[0].clone(),
+                Ok(_) => continue,
+                Err(e) => {
+                    warn!(">> SQMUSIC: fallback search {} failed: {}", plug, e);
+                    last_err = Some(e);
+                    continue;
+                }
+            }
+        };
+        let br = if idx == 0 {
+            br.clone()
+        } else {
+            crate::sqm::pick_br_type(&target.brTypes)
+                .unwrap_or_else(|| target.brTypes.first().cloned().unwrap_or_default())
+        };
+        if idx > 0 {
+            info!(">> SQMUSIC: retry via {} source", plug);
+        }
+        match try_download_and_send(&bot, &sqm, &music_dir, chat_id, &target, &br).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                warn!(">> SQMUSIC: {} attempt failed: {}", plug, e);
+                last_err = Some(e);
+            }
+        }
+    }
+    let reason = last_err.map(|e| e.to_string()).unwrap_or_else(|| "未知原因".to_string());
+    bot.send_message(chat_id, format!("❌ 下载失败：{}", reason)).await?;
+    Ok(())
+}
+
+/// 单源下载尝试：提交下载 -> 等待任务 -> 找文件 -> 发回音频 + 完成消息。
+async fn try_download_and_send(
+    bot: &Bot,
+    sqm: &Arc<SqmusicClient>,
+    music_dir: &PathBuf,
+    chat_id: ChatId,
+    song: &MusicRecord,
+    br: &str,
+) -> Result<()> {
+    sqm.download_song(song, br).await?;
     let task = sqm.wait_task(&song.id, 90).await?;
-    let file = crate::sqm::find_latest_audio(&music_dir, &task).await?;
-    let title = task.downloadMusicname.clone().unwrap_or_else(|| song.name.clone());
+    let file = crate::sqm::find_latest_audio(music_dir, &task).await?;
+    let title = task
+        .downloadMusicname
+        .clone()
+        .unwrap_or_else(|| song.name.clone());
     let performer = task
         .downloadArtistname
         .clone()
@@ -287,6 +345,11 @@ async fn download_and_send(
     req.payload_mut().title = Some(title);
     req.payload_mut().performer = Some(performer);
     req.await?;
-    bot.send_message(chat_id, "✅ 下载完成，已同步到音乐库").await?;
+    let fname = file.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+    bot.send_message(
+        chat_id,
+        format!("✅ 下载完成：{}〔{}〕，已同步到音乐库", fname, br.replace('_', " ")),
+    )
+    .await?;
     Ok(())
 }

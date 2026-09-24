@@ -130,12 +130,16 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                 };
                 let keyword = keyword.trim();
                 if keyword.is_empty() {
-                    bot.send_message(msg.chat.id, "用法：/music <歌名> [歌手]，例如 /music 晴天 周杰伦")
+                    bot.send_message(msg.chat.id, "用法：/music <歌名> [歌手]，例如 /music 晴天 周杰伦\n可加音质/来源前缀：/music flac 晴天、/music qq 晴天")
                         .await?;
                     return Ok(());
                 }
+                // 解析可选前缀：音质（flac/ape/wav/m4a/320/128）或来源（kw/qq/mg/...）
+                let (pref, plug, keyword) = parse_music_args(keyword);
+                let plug_name = plug.as_deref().unwrap_or("kw");
+                let search_plug = plug_name.to_string();
                 // search with kw first (most songs free to download)
-                let songs = match sqm.search("kw", keyword, 5).await {
+                let songs = match sqm.search(&search_plug, &keyword, 5).await {
                     Ok(s) if !s.is_empty() => s,
                     Ok(_) => {
                         bot.send_message(msg.chat.id, format!("未找到「{}」相关歌曲", keyword))
@@ -154,6 +158,7 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                     PendingMusic {
                         songs: top.clone(),
                         created: Instant::now(),
+                        pref: pref.clone(),
                     },
                 );
                 let mut text = format!(
@@ -167,7 +172,7 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                         s.artistName.join("/")
                     };
                     let album = s.albumName.clone().unwrap_or_else(|| "未知专辑".to_string());
-                    let br = crate::sqm::pick_br_type(&s.brTypes)
+                    let br = crate::sqm::pick_br_type_with_pref(&s.brTypes, pref.as_deref())
                         .map(|b| b.replace('_', " "))
                         .unwrap_or_else(|| "自动".to_string());
                     text.push_str(&format!(
@@ -183,6 +188,28 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                 Ok(())
             },
         ))
+}
+
+/// 解析 /music 参数中的可选前缀：音质（flac/320 等）与来源（kw/qq 等），返回 (音质, 来源, 歌名词)。
+fn parse_music_args(input: &str) -> (Option<String>, Option<String>, String) {
+    let mut pref: Option<String> = None;
+    let mut plug: Option<String> = None;
+    let mut rest: Vec<&str> = Vec::new();
+    for p in input.split_whitespace() {
+        let low = p.to_ascii_lowercase();
+        if pref.is_none()
+            && matches!(low.as_str(), "flac" | "ape" | "wav" | "m4a" | "ogg" | "320" | "128")
+        {
+            pref = Some(low);
+        } else if plug.is_none()
+            && matches!(low.as_str(), "kw" | "qq" | "mg" | "mgg" | "netease" | "kg" | "apple" | "qqvip")
+        {
+            plug = Some(low);
+        } else {
+            rest.push(p);
+        }
+    }
+    (pref, plug, rest.join(" "))
 }
 
 async fn auth(bot: &Bot, dialogue: &MyDialogue, msg: &Message, ctx: &Context) -> Result<bool> {
