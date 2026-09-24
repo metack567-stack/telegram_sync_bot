@@ -163,10 +163,9 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                     },
                 );
                 let mut text = format!(
-                    "🎵 搜索到「{}」相关歌曲，点歌名选择（60 秒内有效）：\n",
+                    "🎵 搜索到「{}」相关歌曲，点下方序号选择（60 秒内有效）：\n",
                     keyword
                 );
-                let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
                 for (i, s) in top.iter().enumerate() {
                     let artist = if s.artistName.is_empty() {
                         "未知歌手".to_string()
@@ -185,19 +184,18 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                         album,
                         br
                     ));
-                    // 歌名按钮：点一下直接进入该歌的音质选择
-                    let mut label = format!("{}. {}", i + 1, s.name);
-                    if label.chars().count() > 24 {
-                        label = label.chars().take(24).collect::<String>() + "…";
-                    }
-                    buttons.push(vec![InlineKeyboardButton::callback(
-                        label,
-                        format!("music:pick:{}", i),
-                    )]);
                 }
+                // 序号按钮横向一排，点一下直接进入该歌的音质选择
+                let row: Vec<InlineKeyboardButton> = top
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        InlineKeyboardButton::callback((i + 1).to_string(), format!("music:pick:{}", i))
+                    })
+                    .collect();
                 let mut req = bot.send_message(msg.chat.id, text);
                 req.payload_mut().reply_markup = Some(teloxide::types::ReplyMarkup::InlineKeyboard(
-                    InlineKeyboardMarkup::new(buttons),
+                    InlineKeyboardMarkup::new(vec![row]),
                 ));
                 req.await?;
                 Ok(())
