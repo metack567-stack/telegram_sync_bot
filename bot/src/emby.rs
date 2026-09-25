@@ -371,44 +371,6 @@ impl EmbyClient {
         Ok(out)
     }
 
-    /// 按 Id 查歌单基本信息（GET /Items?Ids={id}），用于回调里反查名字。
-    /// 注：amilys fork 的 /Playlists/{id} 与 /Items/{id} 单查接口均 404，
-    /// 改用批量按 Id 查询（返回 {Items:[...]}）。
-    pub async fn get_playlist(&self, playlist_id: &str) -> Result<PlaylistInfo> {
-        let resp = self
-            .http
-            .get(format!("{}/Items", self.base))
-            .query(&[
-                ("Ids", playlist_id),
-                ("api_key", &self.api_key),
-            ])
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            return Err(anyhow!("emby playlist get -> HTTP {status}: {text}"));
-        }
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow!("emby playlist get bad json: {e}: {text}"))?;
-        let item = v
-            .get("Items")
-            .and_then(|i| i.as_array())
-            .and_then(|a| a.first())
-            .ok_or_else(|| anyhow!("no playlist item in response: {text}"))?;
-        let id = item
-            .get("Id")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| anyhow!("no playlist id in response: {text}"))?;
-        let name = item
-            .get("Name")
-            .and_then(|x| x.as_str())
-            .unwrap_or("未知歌单")
-            .to_string();
-        Ok(PlaylistInfo { id, name })
-    }
-
     /// 删除歌单（DELETE /Items/{id}，已验证 amilys 版本返回 204）。
     pub async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
         let resp = self

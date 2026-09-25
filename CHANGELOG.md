@@ -31,7 +31,7 @@ Note: In this file, do not use the hard wrap in the middle of a sentence for com
 - `/music` 下载完成新歌后自动触发 Emby 音乐库扫描（`Library/Refresh`），无需手动刷新
 - 新增 Emby 歌单：`/playlist <歌单名>` 创建/打开 Emby 播放列表；`/emby` 搜索结果点 ➕ 一键把歌加入歌单（Emby 音乐库直接可播）
 - `/music` 搜索结果同样支持 ➕ 一键加入当前歌单：歌曲需已在 Emby 音乐库（未下载/未扫描时提示先下载）
-- **试听先行**：新增 `MUSIC_TMP_DIR` 临时试听区（如 `/music-tmp`）。`/music` 下载先落临时区不入库，音频回传 + 操作面板 `[📥 入库] [❤️ 收藏] [🗑 删除]`；入库=移入音乐库并自动刷新 Emby，收藏=写 SQLite（文件保留），删除=删临时文件；10 分钟未操作由后台任务定时清理（`MUSIC_TMP_RETENTION_SECS` 默认 86400s、`MUSIC_TMP_KEEP` 默认 50）
+- **试听先行**：新增 `MUSIC_TMP_DIR` 临时试听区（如 `/music-tmp`）。`/music` 下载先落临时区不入库，音频回传 + 操作面板 `[📥 入库] [❤️ 收藏] [🗑 删除]`；入库=移入音乐库并自动刷新 Emby，收藏=写 SQLite（文件保留），删除=删临时文件；超时未操作由后台任务定时清理（`MUSIC_TMP_RETENTION_SECS` 默认 86400s、`MUSIC_TMP_KEEP` 默认 50）
 - 新增 `/favs` 音乐收藏命令：收藏列表（含专辑/收藏时间），点序号播放、随时取消收藏（favorites 表持久化）
 - `/playlist` 支持查看歌单内歌曲（`playlist_items`），点序号直接在 Telegram 播放；入库后的歌单里可继续 ➕ 加歌
 - `/playlist <歌单名>` 就绪后直接列出歌单内已有歌曲（点序号播放），空歌单给出加歌指引，不再只显示"已就绪"提示
