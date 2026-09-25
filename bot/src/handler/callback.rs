@@ -1,6 +1,6 @@
 use crate::{
     context::Context,
-    emby::{PendingEmby, PlaylistCtx},
+    emby::{PendingEmby, PendingPlaylistList, PlaylistCtx},
     storage::MyStorage,
 };
 use anyhow::Result;
@@ -342,54 +342,8 @@ async fn handle_music_act(
                 edit_message(&bot, chat_id, msg_id, "⚠️ 请先 📥 入库，才能加入歌单").await;
                 return Ok(());
             }
-            let Some(playlist) = ctx.playlist.lock().clone() else {
-                edit_message(&bot, chat_id, msg_id, "❌ 未设置歌单，先用 /playlist <歌单名> 创建").await;
-                return Ok(());
-            };
-            let Some(emby) = ctx.emby.clone() else {
-                return Ok(());
-            };
-            let artist = if pending.artist == "未知歌手" {
-                None
-            } else {
-                Some(pending.artist.as_str())
-            };
-            match emby.find_song(&pending.name, artist).await {
-                Ok(Some(found)) => match emby.add_to_playlist(&playlist.id, &found.Id).await {
-                    Ok(()) => {
-                        info!(
-                            ">> EMBY: add {} to playlist {} ({})",
-                            found.Name, playlist.name, playlist.id
-                        );
-                        bot.send_message(
-                            chat_id,
-                            format!("➕ 已加入歌单「{}」：{}", playlist.name, found.Name),
-                        )
-                        .await?;
-                        edit_message(
-                            &bot,
-                            chat_id,
-                            msg_id,
-                            format!("✅ 已入库并加入歌单「{}」：{}", playlist.name, pending.name),
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        warn!(">> EMBY: add to playlist failed: {}", e);
-                        bot.send_message(chat_id, format!("❌ 加入歌单失败：{}", e)).await?;
-                    }
-                },
-                Ok(None) => {
-                    bot.send_message(
-                        chat_id,
-                        format!("⚠️ 音乐库还没扫到「{}」，稍等几分钟再试（或 /emby {} 确认）", pending.name, pending.name),
-                    )
-                    .await?;
-                }
-                Err(e) => {
-                    bot.send_message(chat_id, format!("❌ 查询音乐库失败：{}", e)).await?;
-                }
-            }
+            // 弹出 Emby 歌单列表，点序号当场选择要加入的歌单
+            render_playlist_list_ui(&bot, &ctx, chat_id, Some(msg_id), PlaylistListMode::AddTo).await;
         }
         _ => {}
     }
@@ -641,25 +595,198 @@ async fn handle_playlist_cb(
             render_playlist_songs(&bot, &ctx, chat_id, msg_id, &playlist).await;
         }
         Some(&"open") => {
-            // 从 /playlist 歌单列表点按钮打开：playlist:open:<id>
-            let Some(id) = parts.get(2).map(|s| s.to_string()) else {
+            // 从 /playlist 歌单列表点序号打开：playlist:open:<idx>
+            let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
                 return Ok(());
             };
-            let Some(emby) = ctx.emby.clone() else {
-                edit_message(&bot, chat_id, msg_id, "Emby 联动未启用").await;
+            let pending = ctx.playlist_list_pending.lock().get(&chat_id).cloned();
+            let Some(pending) = pending else {
+                edit_message(&bot, chat_id, msg_id, "❌ 歌单列表已过期，请重新 /playlist").await;
                 return Ok(());
             };
-            let info = match emby.get_playlist(&id).await {
-                Ok(i) => i,
-                Err(e) => {
-                    edit_message(&bot, chat_id, msg_id, format!("❌ 读取歌单失败：{}", e)).await;
-                    return Ok(());
-                }
+            if pending.expired() {
+                ctx.playlist_list_pending.lock().remove(&chat_id);
+                edit_message(&bot, chat_id, msg_id, "❌ 歌单列表已过期，请重新 /playlist").await;
+                return Ok(());
+            }
+            let Some(info) = pending.lists.get(idx).cloned() else {
+                return Ok(());
             };
             let playlist = PlaylistCtx { id: info.id, name: info.name };
             ctx.playlist.lock().replace(playlist.clone());
             info!(">> EMBY: playlist opened {} ({})", playlist.name, playlist.id);
             render_playlist_songs(&bot, &ctx, chat_id, msg_id, &playlist).await;
+        }
+        Some(&"list") => {
+            // 从歌单歌曲列表点 🔙 返回：重新显示歌单列表
+            render_playlist_list_ui(&bot, &ctx, chat_id, Some(msg_id), PlaylistListMode::Open).await;
+        }
+        Some(&"dellist") => {
+            // 进入删除模式：选择要删除的歌单
+            render_playlist_list_ui(&bot, &ctx, chat_id, Some(msg_id), PlaylistListMode::Delete).await;
+        }
+        Some(&"delpick") => {
+            // 删除模式点序号：两步确认
+            let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
+                return Ok(());
+            };
+            let pending = ctx.playlist_list_pending.lock().get(&chat_id).cloned();
+            let Some(pending) = pending else {
+                edit_message(&bot, chat_id, msg_id, "❌ 歌单列表已过期，请重新 /playlist").await;
+                return Ok(());
+            };
+            if pending.expired() {
+                ctx.playlist_list_pending.lock().remove(&chat_id);
+                edit_message(&bot, chat_id, msg_id, "❌ 歌单列表已过期，请重新 /playlist").await;
+                return Ok(());
+            }
+            let Some(info) = pending.lists.get(idx).cloned() else {
+                return Ok(());
+            };
+            let text = format!("⚠️ 确认删除歌单「{}」？删除后不可恢复。", info.name);
+            let kb = InlineKeyboardMarkup::new(vec![
+                vec![InlineKeyboardButton::callback(
+                    "✅ 确认删除",
+                    format!("playlist:deldone:{}", idx),
+                )],
+                vec![InlineKeyboardButton::callback("❌ 取消", "playlist:list")],
+            ]);
+            edit_message_with_kb(&bot, chat_id, msg_id, text, kb).await;
+        }
+        Some(&"deldone") => {
+            // 确认删除歌单
+            let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
+                return Ok(());
+            };
+            let pending = ctx.playlist_list_pending.lock().get(&chat_id).cloned();
+            let Some(pending) = pending else {
+                edit_message(&bot, chat_id, msg_id, "❌ 歌单列表已过期，请重新 /playlist").await;
+                return Ok(());
+            };
+            let Some(info) = pending.lists.get(idx).cloned() else {
+                return Ok(());
+            };
+            let Some(emby) = ctx.emby.clone() else {
+                return Ok(());
+            };
+            match emby.delete_playlist(&info.id).await {
+                Ok(()) => {
+                    // 若删除的是当前歌单，清除选中（guard 全部临时，避免跨 await 捕获非 Send）
+                    if ctx.playlist.lock().as_ref().is_some_and(|c| c.id == info.id) {
+                        *ctx.playlist.lock() = None;
+                    }
+                    // 从暂存列表移除该歌单
+                    if let Some(p) = ctx.playlist_list_pending.lock().get_mut(&chat_id) {
+                        p.lists.retain(|x| x.id != info.id);
+                    }
+                    info!(">> EMBY: playlist deleted {} ({})", info.name, info.id);
+                    edit_message(&bot, chat_id, msg_id, format!("🗑 已删除歌单「{}」", info.name)).await;
+                }
+                Err(e) => {
+                    edit_message(&bot, chat_id, msg_id, format!("❌ 删除歌单失败：{}", e)).await;
+                }
+            }
+        }
+        Some(&"addpick") => {
+            // ➕ 加入歌单：点序号加入对应歌单
+            let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
+                return Ok(());
+            };
+            let pending_list = ctx.playlist_list_pending.lock().get(&chat_id).cloned();
+            let Some(pending_list) = pending_list else {
+                edit_message(&bot, chat_id, msg_id, "❌ 歌单列表已过期，请重新操作").await;
+                return Ok(());
+            };
+            if pending_list.expired() {
+                ctx.playlist_list_pending.lock().remove(&chat_id);
+                edit_message(&bot, chat_id, msg_id, "❌ 歌单列表已过期，请重新操作").await;
+                return Ok(());
+            }
+            let Some(info) = pending_list.lists.get(idx).cloned() else {
+                return Ok(());
+            };
+            let pending = ctx.music_act.lock().get(&chat_id).cloned();
+            let Some(pending) = pending else {
+                edit_message(&bot, chat_id, msg_id, "❌ 操作已过期，请重新 /music 下载试听").await;
+                return Ok(());
+            };
+            if pending.expired() {
+                ctx.music_act.lock().remove(&chat_id);
+                edit_message(&bot, chat_id, msg_id, "❌ 操作已过期，请重新 /music 下载试听").await;
+                return Ok(());
+            }
+            if !pending.kept {
+                edit_message(&bot, chat_id, msg_id, "⚠️ 请先 📥 入库，才能加入歌单").await;
+                return Ok(());
+            }
+            let Some(emby) = ctx.emby.clone() else {
+                return Ok(());
+            };
+            let artist = if pending.artist == "未知歌手" {
+                None
+            } else {
+                Some(pending.artist.as_str())
+            };
+            match emby.find_song(&pending.name, artist).await {
+                Ok(Some(found)) => match emby.add_to_playlist(&info.id, &found.Id).await {
+                    Ok(()) => {
+                        // 记住最后使用的歌单
+                        ctx.playlist.lock().replace(PlaylistCtx {
+                            id: info.id.clone(),
+                            name: info.name.clone(),
+                        });
+                        info!(">> EMBY: add {} to playlist {} ({})", found.Name, info.name, info.id);
+                        edit_message(
+                            &bot,
+                            chat_id,
+                            msg_id,
+                            format!("➕ 已加入歌单「{}」：{}", info.name, found.Name),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        warn!(">> EMBY: add to playlist failed: {}", e);
+                        edit_message(&bot, chat_id, msg_id, format!("❌ 加入歌单失败：{}", e)).await;
+                    }
+                },
+                Ok(None) => {
+                    edit_message(
+                        &bot,
+                        chat_id,
+                        msg_id,
+                        format!(
+                            "⚠️ 音乐库还没扫到「{}」，稍等几分钟再试（或 /emby {} 确认）",
+                            pending.name, pending.name
+                        ),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    edit_message(&bot, chat_id, msg_id, format!("❌ 查询音乐库失败：{}", e)).await;
+                }
+            }
+        }
+        Some(&"actback") => {
+            // ➕ 加入歌单弹列表后 🔙 返回：重建入库面板
+            let pending = ctx.music_act.lock().get(&chat_id).cloned();
+            let Some(pending) = pending else {
+                edit_message(&bot, chat_id, msg_id, "❌ 操作已过期，请重新 /music 下载试听").await;
+                return Ok(());
+            };
+            if pending.expired() {
+                ctx.music_act.lock().remove(&chat_id);
+                edit_message(&bot, chat_id, msg_id, "❌ 操作已过期，请重新 /music 下载试听").await;
+                return Ok(());
+            }
+            let text = format!(
+                "✅ 已入库：{} - {}\n（音乐库已同步，可加入歌单）",
+                pending.name, pending.artist
+            );
+            let kb = InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("➕ 加入歌单", "music:act:playlist"),
+                InlineKeyboardButton::callback("❤️ 收藏", "music:act:fav"),
+            ]]);
+            edit_message_with_kb(&bot, chat_id, msg_id, text, kb).await;
         }
         Some(&"play") => {
             let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
@@ -704,6 +831,124 @@ async fn handle_playlist_cb(
         _ => {}
     }
     Ok(())
+}
+
+/// 歌单列表展示模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlaylistListMode {
+    /// /playlist 普通选择（点序号打开歌单），底部带 🗑 删除入口
+    Open,
+    /// 入库后 ➕ 加入歌单（点序号加入该歌单），底部带 🔙 返回
+    AddTo,
+    /// 删除歌单模式（点序号进入两步确认），底部带 🔙 返回
+    Delete,
+}
+
+/// 拉取并渲染 Emby 歌单列表（序号按钮 + 底部操作行）。
+/// msg_id 为 None 时发新消息（/playlist 命令），否则编辑现有消息。
+pub(crate) async fn render_playlist_list_ui(
+    bot: &Bot,
+    ctx: &Context,
+    chat_id: ChatId,
+    msg_id: Option<teloxide::types::MessageId>,
+    mode: PlaylistListMode,
+) {
+    let Some(emby) = ctx.emby.clone() else {
+        let text = "Emby 联动未启用";
+        match msg_id {
+            Some(id) => edit_message(bot, chat_id, id, text).await,
+            None => {
+                let _ = bot.send_message(chat_id, text).await;
+            }
+        }
+        return;
+    };
+    let lists = match emby.list_playlists().await {
+        Ok(l) => l,
+        Err(e) => {
+            let text = format!("❌ 读取歌单列表失败：{}", e);
+            match msg_id {
+                Some(id) => edit_message(bot, chat_id, id, text).await,
+                None => {
+                    let _ = bot.send_message(chat_id, text).await;
+                }
+            }
+            return;
+        }
+    };
+    if lists.is_empty() {
+        let text = "📋 还没有 Emby 歌单。用 /playlist <歌单名> 创建";
+        match msg_id {
+            Some(id) => edit_message(bot, chat_id, id, text).await,
+            None => {
+                let _ = bot.send_message(chat_id, text).await;
+            }
+        }
+        return;
+    }
+    let cur = ctx.playlist.lock().clone();
+    let (mut text, cb_prefix) = match mode {
+        PlaylistListMode::Open => (
+            format!("📋 选择歌单（点下方序号打开，共 {} 个）：\n", lists.len()),
+            "playlist:open:",
+        ),
+        PlaylistListMode::AddTo => (
+            format!("➕ 选择要加入的歌单（点序号加入，共 {} 个）：\n", lists.len()),
+            "playlist:addpick:",
+        ),
+        PlaylistListMode::Delete => (
+            format!("🗑 选择要删除的歌单（共 {} 个，点序号两步确认）：\n", lists.len()),
+            "playlist:delpick:",
+        ),
+    };
+    for (i, p) in lists.iter().enumerate() {
+        let mark = if cur.as_ref().is_some_and(|c| c.id == p.id) {
+            " ✅当前"
+        } else {
+            ""
+        };
+        text.push_str(&format!("{}. {}{}\n", i + 1, p.name, mark));
+    }
+    ctx.playlist_list_pending.lock().insert(
+        chat_id,
+        PendingPlaylistList {
+            lists: lists.clone(),
+            created: Instant::now(),
+        },
+    );
+    let buttons: Vec<InlineKeyboardButton> = lists
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            InlineKeyboardButton::callback((i + 1).to_string(), format!("{}{}", cb_prefix, i))
+        })
+        .collect();
+    let mut rows: Vec<Vec<InlineKeyboardButton>> =
+        buttons.chunks(8).map(|c| c.to_vec()).collect();
+    let bottom = match mode {
+        PlaylistListMode::Open => {
+            vec![InlineKeyboardButton::callback("🗑 删除歌单", "playlist:dellist")]
+        }
+        PlaylistListMode::AddTo => {
+            vec![InlineKeyboardButton::callback("🔙 返回", "playlist:actback")]
+        }
+        PlaylistListMode::Delete => {
+            vec![InlineKeyboardButton::callback("🔙 返回", "playlist:list")]
+        }
+    };
+    rows.push(bottom);
+    let kb = InlineKeyboardMarkup::new(rows);
+    match msg_id {
+        Some(id) => edit_message_with_kb(bot, chat_id, id, text, kb).await,
+        None => {
+            let mut req = bot.send_message(chat_id, text);
+            req.payload_mut().reply_markup =
+                Some(teloxide::types::ReplyMarkup::InlineKeyboard(kb));
+            if let Err(e) = req.await {
+                warn!(">> PLAYLIST: send list failed: {}", e);
+            }
+        }
+    }
 }
 
 /// 列出歌单内歌曲并附点播序号按钮（playlist:show 与 playlist:open 共用）。
@@ -769,8 +1014,10 @@ async fn render_playlist_songs(
             )
         })
         .collect();
-    let rows: Vec<Vec<InlineKeyboardButton>> =
+    let mut rows: Vec<Vec<InlineKeyboardButton>> =
         buttons.chunks(8).map(|c| c.to_vec()).collect();
+    // 最后一行：返回歌单列表
+    rows.push(vec![InlineKeyboardButton::callback("🔙 返回歌单列表", "playlist:list")]);
     edit_message_with_kb(bot, chat_id, msg_id, text, InlineKeyboardMarkup::new(rows)).await;
 }
 

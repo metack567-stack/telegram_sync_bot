@@ -1,4 +1,4 @@
-use super::MyDialogue;
+use super::{callback::render_playlist_list_ui, callback::PlaylistListMode, MyDialogue};
 use crate::{
     context::Context,
     emby::{PendingEmby, PlaylistCtx},
@@ -303,54 +303,8 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                 };
                 let name = name.trim();
                 if name.is_empty() {
-                    // 无参数：直接列出 Emby 全部歌单，点按钮打开
-                    let lists = match emby.list_playlists().await {
-                        Ok(l) => l,
-                        Err(e) => {
-                            warn!(">> EMBY: list playlists failed: {}", e);
-                            bot.send_message(
-                                msg.chat.id,
-                                format!("❌ 读取歌单列表失败：{}", e),
-                            )
-                            .await?;
-                            return Ok(());
-                        }
-                    };
-                    if lists.is_empty() {
-                        bot.send_message(
-                            msg.chat.id,
-                            "📋 还没有 Emby 歌单。用 /playlist <歌单名> 创建，例如 /playlist 我的歌单",
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                    let cur = ctx.playlist.lock().clone();
-                    let mut text = format!("📋 选择歌单（点下方按钮打开，共 {} 个）：\n", lists.len());
-                    for (i, p) in lists.iter().enumerate() {
-                        let mark = if cur.as_ref().is_some_and(|c| c.id == p.id) {
-                            " ✅当前"
-                        } else {
-                            ""
-                        };
-                        text.push_str(&format!("{}. {}{}\n", i + 1, p.name, mark));
-                    }
-                    let buttons: Vec<InlineKeyboardButton> = lists
-                        .iter()
-                        .map(|p| {
-                            InlineKeyboardButton::callback(
-                                p.name.clone(),
-                                format!("playlist:open:{}", p.id),
-                            )
-                        })
-                        .collect();
-                    let rows: Vec<Vec<InlineKeyboardButton>> =
-                        buttons.chunks(2).map(|c| c.to_vec()).collect();
-                    let mut req = bot.send_message(msg.chat.id, text);
-                    req.payload_mut().reply_markup =
-                        Some(teloxide::types::ReplyMarkup::InlineKeyboard(
-                            InlineKeyboardMarkup::new(rows),
-                        ));
-                    req.await?;
+                    // 无参数：直接列出 Emby 全部歌单（序号按钮 + 🗑 删除入口）
+                    render_playlist_list_ui(&bot, &ctx, msg.chat.id, None, PlaylistListMode::Open).await;
                     return Ok(());
                 }
                 match emby.find_or_create_playlist(&name).await {

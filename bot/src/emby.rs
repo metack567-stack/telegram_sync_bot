@@ -46,6 +46,19 @@ pub struct PlaylistInfo {
     pub name: String,
 }
 
+/// 用户等待点选的 Emby 歌单列表（/playlist 无参数列出后点选）。
+#[derive(Debug, Clone)]
+pub struct PendingPlaylistList {
+    pub lists: Vec<PlaylistInfo>,
+    pub created: Instant,
+}
+
+impl PendingPlaylistList {
+    pub fn expired(&self) -> bool {
+        self.created.elapsed() > Duration::from_secs(60)
+    }
+}
+
 /// Emby 后端 HTTP 客户端（只读查询 + 库刷新 + 歌单管理，api_key 认证）。
 /// 注意：Emby 返回的 Path 是 Emby 容器视角的路径；本 bot 的 MUSIC_DIR
 /// 与 Emby 挂载同一宿主音乐库且同为 `/music` 时路径可直接使用。
@@ -329,8 +342,7 @@ impl EmbyClient {
     }
 
     /// 列出 Emby 中全部播放列表（歌单），供 /playlist 无参数选择。
-    pub async fn list_playlists(&self) -> Result<Vec<PlaylistInfo>> {
-        let resp = self
+    pub async fn list_playlists(&self) -> Result<Vec<PlaylistInfo>> {        let resp = self
             .http
             .get(format!("{}/Items", self.base))
             .query(&[
@@ -395,5 +407,21 @@ impl EmbyClient {
             .unwrap_or("未知歌单")
             .to_string();
         Ok(PlaylistInfo { id, name })
+    }
+
+    /// 删除歌单（DELETE /Items/{id}，已验证 amilys 版本返回 204）。
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!("{}/Items/{}", self.base, playlist_id))
+            .query(&[("api_key", &self.api_key)])
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            return Err(anyhow!("emby delete playlist -> HTTP {status}: {text}"));
+        }
+        Ok(())
     }
 }

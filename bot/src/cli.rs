@@ -216,6 +216,7 @@ impl Cli {
                         emby_pending: Mutex::new(HashMap::new()),
                         playlist: Mutex::new(None),
                         playlist_pending: Mutex::new(HashMap::new()),
+                        playlist_list_pending: Mutex::new(HashMap::new()),
                         music_pending: Mutex::new(HashMap::new()),
                         music_act: Mutex::new(HashMap::new()),
                         fav_score_limit,
@@ -366,6 +367,7 @@ impl Cli {
                         emby_pending: Mutex::new(HashMap::new()),
                         playlist: Mutex::new(None),
                         playlist_pending: Mutex::new(HashMap::new()),
+                        playlist_list_pending: Mutex::new(HashMap::new()),
                         hard_link: AtomicBool::new(true), // ensure try hard link once
                     }),
                 };
