@@ -1,0 +1,7 @@
+# 构建上下文精简：避免 COPY . . 把旧编译产物/无关目录带进镜像
+target
+.git
+server
+k8s
+sync-bot.yaml
+kustomization.yaml

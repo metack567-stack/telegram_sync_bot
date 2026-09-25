@@ -7,13 +7,23 @@ RUN apk update \
 
 WORKDIR /work
 
-COPY . .
+# ---- 依赖缓存层：只 COPY 清单 + dummy 源码，把全部依赖编译产物留在这层 ----
+# 源码改动不会触发这层重跑（Cargo.toml/lock 不变），增量构建只重编 bot 本体。
+COPY Cargo.toml Cargo.lock ./
+COPY bot/Cargo.toml bot/Cargo.toml
+COPY migration/Cargo.toml migration/Cargo.toml
+RUN mkdir -p bot/src migration/src \
+    && printf 'fn main() {}\n' > bot/src/main.rs \
+    && touch bot/src/lib.rs migration/src/lib.rs
+# registry 用 cache mount（安全）；编译产物留在镜像层内，避免 cache mount 导致的
+# cargo 误判源码未变、产出旧二进制的问题（见 git 历史注释）。
+RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry cargo fetch
-# 注意：刻意不使用 --mount=type=cache,target=/work/target 缓存编译产物。
-# 该 cache mount 曾导致 cargo 误判源码未变、跳过重编译，产出旧二进制。
-# 每次源码变化时全量编译（NAS 上约 6-7 分钟），保证镜像与源码一致。
-RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release && cp /work/target/release/telegram_sync_bot /work/telegram_sync_bot
+# ---- 真源码层：增量编译 ----
+# .dockerignore 排除了 target/.git/server/k8s，确保 COPY 不会污染层内 target。
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release \
+    && cp /work/target/release/telegram_sync_bot /work/telegram_sync_bot
 
 ########################################
 

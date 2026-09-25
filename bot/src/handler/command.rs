@@ -1,8 +1,14 @@
-use super::{callback::render_emby_results, callback::render_playlist_list_ui, callback::PlaylistListMode, MyDialogue};
+use super::{
+    callback::render_favs_results,
+    callback::render_library_results,
+    callback::render_music_results,
+    callback::render_playlist_list_ui,
+    callback::PlaylistListMode,
+    MyDialogue,
+};
 use crate::{
     context::Context,
     emby::{PendingEmby, PlaylistCtx},
-    sqm::PendingMusic,
     storage::MyStorage,
     utils::gen_key,
 };
@@ -38,9 +44,9 @@ enum Command {
     BypassKey,
     #[command(description = "Clear all downloaded files in normal directory.")]
     Clear,
-    #[command(description = "Search and download music via sqmusic, e.g. /music 晴天")]
+    #[command(description = "音乐库管理器：搜库内歌曲，未命中可在线找歌入库，e.g. /music 晴天")]
     Music(String),
-    #[command(description = "Search music on Emby library, e.g. /emby 晴天")]
+    #[command(description = "已并入 /music，请用 /music 搜索（兼容保留）")]
     Emby(String),
     #[command(description = "Create/open an Emby playlist, e.g. /playlist 我的歌单")]
     Playlist(String),
@@ -127,29 +133,43 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
         ))
         .branch(case![Command::Music(keyword)].endpoint(
             async |bot: Bot, msg: Message, ctx: Context, keyword: String| {
-                let Some(sqm) = &ctx.sqmusic else {
-                    bot.send_message(
-                        msg.chat.id,
-                        "sqmusic 联动未启用（服务端未配置 SQMUSIC_URL）",
-                    )
-                    .await?;
-                    return Ok(());
-                };
-                let keyword = keyword.trim();
+                let keyword = keyword.trim().to_string();
                 if keyword.is_empty() {
                     bot.send_message(msg.chat.id, "用法：/music <歌名> [歌手]，例如 /music 晴天 周杰伦\n可加音质/来源前缀：/music flac 晴天、/music qq 晴天")
                         .await?;
                     return Ok(());
                 }
                 // 解析可选前缀：音质（flac/ape/wav/m4a/320/128）或来源（kw/qq/mg/...）
-                let (pref, plug, keyword) = parse_music_args(keyword);
+                let (pref, plug, keyword) = parse_music_args(&keyword);
+                // ① 先搜 Emby 音乐库（音乐库管理器：库内优先，命中直接管理）
+                if let Some(emby) = &ctx.emby {
+                    match emby.search_songs(&keyword, 8).await {
+                        Ok(songs) if !songs.is_empty() => {
+                            render_library_results(&bot, &ctx, msg.chat.id, None, &keyword, &songs)
+                                .await;
+                            return Ok(());
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(">> EMBY: search failed: {}, fallback to online", e);
+                        }
+                    }
+                }
+                // ② 库内未命中：在线找歌（sqmusic）
+                let Some(sqm) = &ctx.sqmusic else {
+                    bot.send_message(
+                        msg.chat.id,
+                        "音乐库没有「{}」，且 sqmusic 联动未启用（未配置 SQMUSIC_URL）",
+                    )
+                    .await?;
+                    return Ok(());
+                };
                 let plug_name = plug.as_deref().unwrap_or("kw");
-                let search_plug = plug_name.to_string();
                 // search with kw first (most songs free to download)
-                let songs = match sqm.search(&search_plug, &keyword, 5).await {
+                let songs = match sqm.search(plug_name, &keyword, 5).await {
                     Ok(s) if !s.is_empty() => s,
                     Ok(_) => {
-                        bot.send_message(msg.chat.id, format!("未找到「{}」相关歌曲", keyword))
+                        bot.send_message(msg.chat.id, format!("在线也未找到「{}」相关歌曲", keyword))
                             .await?;
                         return Ok(());
                     }
@@ -160,59 +180,23 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                     }
                 };
                 let top = songs.into_iter().take(5).collect::<Vec<_>>();
-                ctx.music_pending.lock().insert(
-                    msg.chat.id,
-                    PendingMusic {
-                        songs: top.clone(),
-                        created: Instant::now(),
-                        pref: pref.clone(),
-                        chosen: None,
-                    },
-                );
-                let mut text = format!(
-                    "🎵 搜索到「{}」相关歌曲，点下方序号选择（60 秒内有效）：\n",
-                    keyword
-                );
-                for (i, s) in top.iter().enumerate() {
-                    let artist = if s.artistName.is_empty() {
-                        "未知歌手".to_string()
-                    } else {
-                        s.artistName.join("/")
-                    };
-                    let album = s.albumName.clone().unwrap_or_else(|| "未知专辑".to_string());
-                    let br = crate::sqm::pick_br_type_with_pref(&s.brTypes, pref.as_deref())
-                        .map(|b| b.replace('_', " "))
-                        .unwrap_or_else(|| "自动".to_string());
-                    text.push_str(&format!(
-                        "{}. {} - {}《{}》〔{}〕\n",
-                        i + 1,
-                        s.name,
-                        artist,
-                        album,
-                        br
-                    ));
-                }
-                // 第一行：序号按钮横向一排，点一下直接进入该歌的音质选择
-                let rows: Vec<Vec<InlineKeyboardButton>> = vec![top
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| {
-                        InlineKeyboardButton::callback((i + 1).to_string(), format!("music:pick:{}", i))
-                    })
-                    .collect()];
-                text.push_str(
-                    "\n下载试听后点 📥 入库，即可在 Emby 播放/加入歌单（先 /playlist <歌单名> 创建）",
-                );
-                let mut req = bot.send_message(msg.chat.id, text);
-                req.payload_mut().reply_markup = Some(teloxide::types::ReplyMarkup::InlineKeyboard(
-                    InlineKeyboardMarkup::new(rows),
-                ));
-                req.await?;
+                render_music_results(&bot, &ctx, msg.chat.id, None, &keyword, &top, pref.as_deref())
+                    .await;
                 Ok(())
             },
         ))
         .branch(case![Command::Emby(keyword)].endpoint(
             async |bot: Bot, msg: Message, ctx: Context, keyword: String| {
+                let keyword = keyword.trim().to_string();
+                if keyword.is_empty() {
+                    bot.send_message(
+                        msg.chat.id,
+                        "ℹ️ /emby 已并入 /music：请用 /music <歌名> 搜索音乐库，未命中可在线找歌入库",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                // 兼容旧习惯：/emby <关键词> = /music 库内搜索（同一套交互）
                 let Some(emby) = &ctx.emby else {
                     bot.send_message(
                         msg.chat.id,
@@ -221,12 +205,6 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                     .await?;
                     return Ok(());
                 };
-                let keyword = keyword.trim();
-                if keyword.is_empty() {
-                    bot.send_message(msg.chat.id, "用法：/emby <歌名> [歌手]，例如 /emby 晴天 周杰伦")
-                        .await?;
-                    return Ok(());
-                }
                 let songs = match emby.search_songs(&keyword, 8).await {
                     Ok(s) => s,
                     Err(e) => {
@@ -240,7 +218,7 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                         .await?;
                     return Ok(());
                 }
-                render_emby_results(&bot, &ctx, msg.chat.id, None, Some(&keyword), &songs).await;
+                render_library_results(&bot, &ctx, msg.chat.id, None, &keyword, &songs).await;
                 Ok(())
             },
         ))
@@ -293,10 +271,11 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                                 PendingEmby {
                                     songs: songs.clone(),
                                     created: Instant::now(),
+                                    keyword: String::new(),
                                 },
                             );
                             let mut text = format!(
-                                "✅ 歌单「{}」已就绪（Emby Id {}），共 {} 首，点序号播放（60 秒内有效）：\n",
+                                "✅ 歌单「{}」已就绪（Emby Id {}），共 {} 首，点序号选择播放/删除（60 秒内有效）：\n",
                                 name,
                                 id,
                                 songs.len()
@@ -315,7 +294,7 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                                 .map(|(i, _)| {
                                     InlineKeyboardButton::callback(
                                         (i + 1).to_string(),
-                                        format!("playlist:play:{}", i),
+                                        format!("playlist:act:{}", i),
                                     )
                                 })
                                 .collect();
@@ -339,45 +318,7 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
         ))
         .branch(case![Command::Favs].endpoint(
             async |bot: Bot, msg: Message, db: MyStorage| {
-                let favs = db.list_favorites(msg.chat.id).await?;
-                if favs.is_empty() {
-                    bot.send_message(
-                        msg.chat.id,
-                        "🎵 还没有收藏。用 /music 下载试听后点 ❤️ 收藏",
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                let mut text = format!("🎵 我的收藏（{}），点序号播放：\n", favs.len());
-                for (i, f) in favs.iter().enumerate() {
-                    let album = if f.album.is_empty() {
-                        String::new()
-                    } else {
-                        format!("《{}》", f.album)
-                    };
-                    text.push_str(&format!(
-                        "{}. {} - {}{}（收藏于 {}）\n",
-                        i + 1, f.name, f.artist, album, f.created_at
-                    ));
-                }
-                let buttons: Vec<InlineKeyboardButton> = favs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| {
-                        InlineKeyboardButton::callback(
-                            (i + 1).to_string(),
-                            format!("favs:play:{}", i),
-                        )
-                    })
-                    .collect();
-                let rows: Vec<Vec<InlineKeyboardButton>> =
-                    buttons.chunks(8).map(|c| c.to_vec()).collect();
-                let mut req = bot.send_message(msg.chat.id, text);
-                req.payload_mut().reply_markup =
-                    Some(teloxide::types::ReplyMarkup::InlineKeyboard(
-                        InlineKeyboardMarkup::new(rows),
-                    ));
-                req.await?;
+                render_favs_results(&bot, msg.chat.id, None, &db).await;
                 Ok(())
             },
         ))

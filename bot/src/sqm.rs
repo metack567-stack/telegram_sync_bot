@@ -27,6 +27,59 @@ pub struct MusicRecord {
     pub plugName: String,
 }
 
+impl MusicRecord {
+    /// 从 dataInfo 里宽松提取专辑封面 URL（兼容多种字段结构）；找不到返回 None。
+    /// 通用字段（albumImgs/pic/imgUrl/cover/...）直接取；酷我(kw)源用
+    /// `webAlbumpicShort`（CDN 相对路径）拼完整封面 URL（已验证 img1.kuwo.cn 可访问）。
+    pub fn cover_url(&self) -> Option<String> {
+        let d = self.dataInfo.as_ref()?;
+        for key in [
+            "albumImgs", "pic", "imgUrl", "cover", "albumPic", "albumImg", "image", "img",
+        ] {
+            let Some(v) = d.get(key) else {
+                continue;
+            };
+            if let Some(s) = v.as_str() {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            } else if let Some(arr) = v.as_array() {
+                if let Some(first) = arr.first() {
+                    if let Some(s) = first.as_str() {
+                        if !s.is_empty() {
+                            return Some(s.to_string());
+                        }
+                    }
+                    if let Some(obj) = first.as_object() {
+                        for k2 in ["url", "img", "src"] {
+                            if let Some(s) = obj.get(k2).and_then(|x| x.as_str()) {
+                                if !s.is_empty() {
+                                    return Some(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if let Some(obj) = v.as_object() {
+                for k2 in ["url", "img", "src", "picUrl"] {
+                    if let Some(s) = obj.get(k2).and_then(|x| x.as_str()) {
+                        if !s.is_empty() {
+                            return Some(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        // 酷我(kw)：webAlbumpicShort 是 CDN 相对路径，拼 img1.kuwo.cn/star/albumcover/
+        if let Some(s) = d.get("webAlbumpicShort").and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Some(format!("https://img1.kuwo.cn/star/albumcover/{}", s));
+            }
+        }
+        None
+    }
+}
+
 /// 下载任务记录（对应 `/api/task/list` 返回的 records[]）。
 /// 字段名保持与接口 JSON 一致（camelCase 契约）。
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +108,8 @@ pub struct PendingMusic {
     pub pref: Option<String>,
     /// 已选中的歌曲下标（进入选音质阶段）；None 表示还在选歌阶段。
     pub chosen: Option<usize>,
+    /// 搜索关键词（音质面板 🔙 返回时重建歌曲列表标题用）。
+    pub keyword: String,
 }
 
 impl PendingMusic {
@@ -63,11 +118,11 @@ impl PendingMusic {
     }
 }
 
-/// 一次"下载试听"的操作状态：文件在临时区，等待用户 入库/收藏/删除。
+/// 一次"下载试听"的操作状态：文件在临时区，等待用户 试听/入库/收藏/删除。
 /// 有效期 10 分钟（听完歌再决定）；超时后按钮失效，文件留给后台定时清理。
 #[derive(Debug, Clone)]
 pub struct DownloadAct {
-    /// 临时区里的文件绝对路径（试听/删除用）
+    /// 试听文件路径（临时区或音乐库文件；入库后临时文件已删除，试听按钮不再可用）
     pub tmp_path: PathBuf,
     /// 相对音乐库的路径（保留 歌手/专辑 子目录结构），入库时 copy 到 MUSIC_DIR 下
     pub rel_path: PathBuf,
@@ -77,6 +132,14 @@ pub struct DownloadAct {
     pub created: Instant,
     /// 是否已入库（入库后按钮变为 ➕ 加入歌单）
     pub kept: bool,
+    /// 是否临时区文件：true=删除安全（删临时文件）；false=音乐库文件（删除请走 /emby 面板）
+    pub is_tmp: bool,
+    /// Emby item id（音乐库命中时有值；删除已入库歌曲走 Emby DELETE 两步确认）
+    pub emby_id: Option<String>,
+    /// 音质/格式标识（面板文案展示用）
+    pub br: String,
+    /// 实际文件格式是否匹配所选音质（面板提示用）
+    pub format_ok: bool,
 }
 
 impl DownloadAct {
@@ -353,7 +416,8 @@ pub fn humanize_br(br: &str) -> String {
     }
 }
 
-/// 为一首歌生成音质选择的内联键盘：该歌可用码率各一个按钮，外加"自动"。
+/// 为一首歌生成音质选择的内联键盘：该歌可用码率各一个按钮，外加"自动"，
+/// 底部一行 🔙 返回选歌 / ❌ 取消。
 /// 回调数据格式：music:dl:<song_idx>:<brType>，brType 为 "auto" 表示自动选。
 pub fn quality_keyboard(song_idx: usize, br_types: &[String]) -> InlineKeyboardMarkup {
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -373,6 +437,10 @@ pub fn quality_keyboard(song_idx: usize, br_types: &[String]) -> InlineKeyboardM
         "⚙️ 自动",
         format!("music:dl:{}:auto", song_idx),
     )]);
+    rows.push(vec![
+        InlineKeyboardButton::callback("🔙 返回选歌", "music:back"),
+        InlineKeyboardButton::callback("❌ 取消", "music:cancel"),
+    ]);
     InlineKeyboardMarkup::new(rows)
 }
 

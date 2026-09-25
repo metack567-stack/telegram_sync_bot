@@ -24,6 +24,8 @@ pub struct EmbySong {
 pub struct PendingEmby {
     pub songs: Vec<EmbySong>,
     pub created: Instant,
+    /// 搜索关键词（信息卡 🔙 返回时重建库内候选列表标题用）。
+    pub keyword: String,
 }
 
 impl PendingEmby {
@@ -92,6 +94,14 @@ impl EmbyClient {
             http,
             user_id: Mutex::new(None),
         })
+    }
+
+    /// 构造某歌曲主图（封面）URL；Emby 无图时该请求可能 404，调用方自行容错。
+    pub fn cover_url(&self, item_id: &str) -> String {
+        format!(
+            "{}/Items/{}/Images/Primary?api_key={}",
+            self.base, item_id, self.api_key
+        )
     }
 
     /// 按关键词搜索 Emby 音乐库中的 Audio 条目，返回原始命中列表（不过滤，供点播选择）。

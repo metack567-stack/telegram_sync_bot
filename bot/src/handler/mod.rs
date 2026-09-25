@@ -1,6 +1,6 @@
 mod callback;
 mod command;
-mod message;
+pub(crate) mod message;
 mod reaction;
 mod utils;
 
