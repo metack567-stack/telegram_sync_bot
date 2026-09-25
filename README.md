@@ -91,10 +91,12 @@ data/                          # 数据目录（-d 指定）
 | `SQMUSIC_USER` | * | sqmusic 登录用户名 | `admin` |
 | `SQMUSIC_PASS` | * | sqmusic 登录密码 | `admin` |
 | `MUSIC_DIR` | * | sqmusic 音乐库目录在 bot 容器内的挂载路径（如 `/music`），用于下载后回传文件 | 不设置（功能关闭） |
+| `EMBY_URL` | * | Emby 服务地址（启用 `/music` 下载前音乐库预查），如 `http://192.168.8.219:9096/emby` | 不设置（功能关闭） |
+| `EMBY_API_KEY` | * | Emby API 密钥（只读查询用） | 不设置（功能关闭） |
 
 `*` 使用本地服务器模式（无 20MB 限制）时需要。API ID / Hash 在 [Telegram 官网](https://core.telegram.org/obtaining_api_id) 申请（申请报错时可尝试 `cloudflare warp` 代理）。
 
-> sqmusic 联动（`/music`）：需同时设置 `SQMUSIC_URL` 与 `MUSIC_DIR`。用法：向机器人发送 `/music 晴天 周杰伦`，按提示回复数字选择歌曲，机器人会调 sqmusic 搜索下载（默认酷我 `kw` 源，免费曲目直接可下），下载完成后把音频文件发回并把歌曲同步到音乐库（Emby 兼容目录 `音乐库/歌手/专辑/`）。
+> sqmusic 联动（`/music`）：需同时设置 `SQMUSIC_URL` 与 `MUSIC_DIR`。用法：向机器人发送 `/music 晴天 周杰伦`，按提示回复数字选择歌曲，机器人会调 sqmusic 搜索下载（默认酷我 `kw` 源，免费曲目直接可下），下载完成后把音频文件发回并把歌曲同步到音乐库（Emby 兼容目录 `音乐库/歌手/专辑/`）。 下载前会先查 Emby 音乐库（配置 `EMBY_URL`/`EMBY_API_KEY` 时）与本地音乐目录：已有该歌则直接回传现有文件，不重复下载；Emby 查询失败时自动回退到本地目录预查。
 
 ## 部署
 
@@ -153,6 +155,9 @@ SQMUSIC_URL=http://sqmusic_main:8099
 SQMUSIC_USER=admin
 SQMUSIC_PASS=admin
 MUSIC_DIR=/music
+# 启用下载前 Emby 音乐库预查（可选）
+EMBY_URL=http://192.168.8.219:9096/emby
+EMBY_API_KEY=your_emby_api_key
 ```
 
 同时给 bot 服务追加音乐库挂载：`- /vol1/1000/音频/音乐:/music:ro`（路径按你的 sqmusic 实际音乐目录调整）。

@@ -5,6 +5,7 @@ use super::{
 };
 use crate::{
     context::Context,
+    emby::EmbyClient,
     sqm::{MusicRecord, SqmusicClient},
     storage::{ChatState, FileState, MyStorage, TransportState},
 };
@@ -259,6 +260,7 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
 pub(crate) async fn download_and_send(
     bot: Bot,
     sqm: Arc<SqmusicClient>,
+    emby: Option<Arc<EmbyClient>>,
     music_dir: PathBuf,
     chat_id: ChatId,
     song: MusicRecord,
@@ -295,7 +297,7 @@ pub(crate) async fn download_and_send(
         if idx > 0 {
             info!(">> SQMUSIC: retry via {} source", plug);
         }
-        match try_download_and_send(&bot, &sqm, &music_dir, chat_id, &target, &br).await {
+        match try_download_and_send(&bot, &sqm, emby.clone(), &music_dir, chat_id, &target, &br).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 warn!(">> SQMUSIC: {} attempt failed: {}", plug, e);
@@ -327,18 +329,53 @@ async fn send_audio_with_title(
         .unwrap_or_default())
 }
 
-/// 单源下载尝试：预查音乐库（已有则直接返回，不重复下载）-> 提交下载 -> 等待任务
+/// 单源下载尝试：Emby 预查 -> 本地预查（已有则直接返回，不重复下载）-> 提交下载
 /// -> 找文件 -> 发回音频 + 完成消息。
 async fn try_download_and_send(
     bot: &Bot,
     sqm: &Arc<SqmusicClient>,
+    emby: Option<Arc<EmbyClient>>,
     music_dir: &PathBuf,
     chat_id: ChatId,
     song: &MusicRecord,
     br: &str,
 ) -> Result<()> {
     let prefer_ext = crate::sqm::ext_from_br(br);
-    // 预查：音乐库已有该歌（sqmusic 判重会跳过下载），直接发回已有文件
+    // Emby 预查（优先）：Emby 是已索引的音乐库，命中则直接发回已有文件，不重复下载
+    if let Some(emby) = &emby {
+        let artist = if song.artistName.is_empty() {
+            None
+        } else {
+            Some(song.artistName.join(" "))
+        };
+        match emby.find_song(&song.name, artist.as_deref()).await {
+            Ok(Some(found)) => {
+                let path = PathBuf::from(&found.Path);
+                if path.exists() {
+                    let title = song.name.clone();
+                    let performer = if song.artistName.is_empty() {
+                        "未知歌手".to_string()
+                    } else {
+                        song.artistName.join("/")
+                    };
+                    let fname = send_audio_with_title(bot, chat_id, &path, title, performer).await?;
+                    bot.send_message(
+                        chat_id,
+                        format!("✅ Emby 音乐库已有该歌（{}），未重复下载", fname),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                // Emby 命中但路径在 bot 容器不可见：降级走本地预查/正常下载
+                info!(">> EMBY: hit but path not visible to bot: {}, fallback", found.Path);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(">> EMBY: pre-check failed: {}, fallback to local", e);
+            }
+        }
+    }
+    // 本地预查：音乐库已有该歌（sqmusic 判重会跳过下载），直接发回已有文件
     if let Some(found) = crate::sqm::find_in_library(music_dir, song, prefer_ext) {
         let title = song.name.clone();
         let performer = if song.artistName.is_empty() {

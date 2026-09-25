@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::{collections::HashMap, collections::HashSet, path::PathBuf, sync::Arc};
 use teloxide::types::{ChatId, UserId};
 
+use crate::emby::EmbyClient;
 use crate::sqm::{PendingMusic, SqmusicClient};
 
 #[derive(Debug, Clone)]
@@ -34,6 +35,8 @@ pub struct ContextInner {
 
     // sqmusic integration (env SQMUSIC_URL): None = feature disabled
     pub sqmusic: Option<Arc<SqmusicClient>>,
+    // emby music library pre-check (env EMBY_URL/EMBY_API_KEY): None = feature disabled
+    pub emby: Option<Arc<EmbyClient>>,
     // where sqmusic writes music files, seen from this container (env MUSIC_DIR)
     pub music_dir: Option<PathBuf>,
     // chat_id -> songs waiting for user to pick (expires in 60s)
@@ -56,6 +59,7 @@ impl fmt::Display for Context {
             .field("db_dir", &self.db_dir.canonicalize().ok())
             .field("server_cache_dir", &self.server_cache_dir.canonicalize().ok())
             .field("sqmusic", &self.sqmusic.as_ref().map(|_| "enabled"))
+            .field("emby", &self.emby.as_ref().map(|_| "enabled"))
             .field("music_dir", &self.music_dir)
             .finish()
     }

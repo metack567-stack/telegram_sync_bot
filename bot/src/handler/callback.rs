@@ -214,9 +214,10 @@ async fn handle_music_dl(
     if let (Some(sqm), Some(music_dir)) = (&ctx.sqmusic, &ctx.music_dir) {
         let sqm = sqm.clone();
         let music_dir = music_dir.clone();
+        let emby = ctx.emby.clone();
         let bot = bot.clone();
         tokio::spawn(async move {
-            if let Err(e) = super::message::download_and_send(bot, sqm, music_dir, chat_id, song, br).await {
+            if let Err(e) = super::message::download_and_send(bot, sqm, emby, music_dir, chat_id, song, br).await {
                 warn!(">> SQMUSIC: download flow failed: {}", e);
             }
         });

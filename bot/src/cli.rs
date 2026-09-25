@@ -1,6 +1,7 @@
 use crate::handler::handler;
 use crate::{
     context::{Context, ContextInner},
+    emby::EmbyClient,
     sqm::SqmusicClient,
     storage::MyStorage,
     utils::gen_key,
@@ -185,6 +186,23 @@ impl Cli {
                             }
                             dir
                         },
+                        emby: {
+                            match (
+                                std::env::var("EMBY_URL"),
+                                std::env::var("EMBY_API_KEY"),
+                            ) {
+                                (Ok(url), Ok(key))
+                                    if !url.trim().is_empty() && !key.trim().is_empty() =>
+                                {
+                                    info!(">> INIT: emby enabled: {}", url.trim());
+                                    Some(EmbyClient::new(url.trim().to_string(), key.trim().to_string()))
+                                }
+                                _ => {
+                                    info!(">> INIT: emby disabled (EMBY_URL/EMBY_API_KEY unset)");
+                                    None
+                                }
+                            }
+                        },
                         music_pending: Mutex::new(HashMap::new()),
                         fav_score_limit,
                         dislike_score_limit,
@@ -289,6 +307,7 @@ impl Cli {
                         fav_score_limit: 0,
                         dislike_score_limit: 0,
                         sqmusic: None,
+                        emby: None,
                         music_dir: None,
                         music_pending: Mutex::new(HashMap::new()),
                         hard_link: AtomicBool::new(true), // ensure try hard link once

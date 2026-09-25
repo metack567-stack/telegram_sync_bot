@@ -1,5 +1,6 @@
 mod cli;
 mod context;
+mod emby;
 mod handler;
 mod sqm;
 mod storage;
