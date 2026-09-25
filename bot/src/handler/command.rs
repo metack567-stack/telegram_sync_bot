@@ -303,31 +303,54 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                 };
                 let name = name.trim();
                 if name.is_empty() {
-                    let cur = ctx.playlist.lock().clone();
-                    match cur {
-                        Some(p) => {
-                            let kb = InlineKeyboardMarkup::new(vec![vec![
-                                InlineKeyboardButton::callback("📋 查看歌单歌曲", "playlist:show"),
-                            ]]);
-                            let mut req = bot.send_message(
-                                msg.chat.id,
-                                format!(
-                                    "当前歌单：「{}」（Emby Id {}）。\n点下方查看歌单内歌曲，或 /playlist <歌单名> 切换/新建",
-                                    p.name, p.id
-                                ),
-                            );
-                            req.payload_mut().reply_markup =
-                                Some(teloxide::types::ReplyMarkup::InlineKeyboard(kb));
-                            req.await?;
-                        }
-                        None => {
+                    // 无参数：直接列出 Emby 全部歌单，点按钮打开
+                    let lists = match emby.list_playlists().await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            warn!(">> EMBY: list playlists failed: {}", e);
                             bot.send_message(
                                 msg.chat.id,
-                                "用法：/playlist <歌单名>，例如 /playlist 我的歌单\n创建后在 /emby 搜索结果点 ➕ 即可把歌加入",
+                                format!("❌ 读取歌单列表失败：{}", e),
                             )
                             .await?;
+                            return Ok(());
                         }
+                    };
+                    if lists.is_empty() {
+                        bot.send_message(
+                            msg.chat.id,
+                            "📋 还没有 Emby 歌单。用 /playlist <歌单名> 创建，例如 /playlist 我的歌单",
+                        )
+                        .await?;
+                        return Ok(());
                     }
+                    let cur = ctx.playlist.lock().clone();
+                    let mut text = format!("📋 选择歌单（点下方按钮打开，共 {} 个）：\n", lists.len());
+                    for (i, p) in lists.iter().enumerate() {
+                        let mark = if cur.as_ref().is_some_and(|c| c.id == p.id) {
+                            " ✅当前"
+                        } else {
+                            ""
+                        };
+                        text.push_str(&format!("{}. {}{}\n", i + 1, p.name, mark));
+                    }
+                    let buttons: Vec<InlineKeyboardButton> = lists
+                        .iter()
+                        .map(|p| {
+                            InlineKeyboardButton::callback(
+                                p.name.clone(),
+                                format!("playlist:open:{}", p.id),
+                            )
+                        })
+                        .collect();
+                    let rows: Vec<Vec<InlineKeyboardButton>> =
+                        buttons.chunks(2).map(|c| c.to_vec()).collect();
+                    let mut req = bot.send_message(msg.chat.id, text);
+                    req.payload_mut().reply_markup =
+                        Some(teloxide::types::ReplyMarkup::InlineKeyboard(
+                            InlineKeyboardMarkup::new(rows),
+                        ));
+                    req.await?;
                     return Ok(());
                 }
                 match emby.find_or_create_playlist(&name).await {
@@ -336,14 +359,71 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                             .lock()
                             .replace(PlaylistCtx { id: id.clone(), name: name.to_string() });
                         info!(">> EMBY: playlist ready {} ({})", name, id);
-                        bot.send_message(
-                            msg.chat.id,
-                            format!(
-                                "✅ 歌单「{}」已就绪（Emby 播放列表 Id {}）。\n现在去 /emby <歌名> 搜索，点 ➕ 即可加入歌曲",
-                                name, id
-                            ),
-                        )
-                        .await?;
+                        // 就绪后直接列出歌单内歌曲
+                        let songs = match emby.playlist_items(&id).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                bot.send_message(
+                                    msg.chat.id,
+                                    format!(
+                                        "✅ 歌单「{}」已就绪（Emby Id {}）。\n但读取歌曲列表失败：{}",
+                                        name, id, e
+                                    ),
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                        };
+                        if songs.is_empty() {
+                            bot.send_message(
+                                msg.chat.id,
+                                format!(
+                                    "✅ 歌单「{}」已就绪（Emby Id {}）。\n📋 歌单还是空的：用 /music 下载试听后 📥 入库，再点 ➕ 加入歌单",
+                                    name, id
+                                ),
+                            )
+                            .await?;
+                        } else {
+                            ctx.playlist_pending.lock().insert(
+                                msg.chat.id,
+                                PendingEmby {
+                                    songs: songs.clone(),
+                                    created: Instant::now(),
+                                },
+                            );
+                            let mut text = format!(
+                                "✅ 歌单「{}」已就绪（Emby Id {}），共 {} 首，点序号播放（60 秒内有效）：\n",
+                                name,
+                                id,
+                                songs.len()
+                            );
+                            for (i, s) in songs.iter().enumerate() {
+                                let artist = if s.Artists.is_empty() {
+                                    "未知歌手".to_string()
+                                } else {
+                                    s.Artists.join("/")
+                                };
+                                text.push_str(&format!("{}. {} - {}\n", i + 1, s.Name, artist));
+                            }
+                            let buttons: Vec<InlineKeyboardButton> = songs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, _)| {
+                                    InlineKeyboardButton::callback(
+                                        (i + 1).to_string(),
+                                        format!("playlist:play:{}", i),
+                                    )
+                                })
+                                .collect();
+                            let rows: Vec<Vec<InlineKeyboardButton>> =
+                                buttons.chunks(8).map(|c| c.to_vec()).collect();
+                            let mut req = bot.send_message(msg.chat.id, text);
+                            req.payload_mut().reply_markup =
+                                Some(teloxide::types::ReplyMarkup::InlineKeyboard(
+                                    InlineKeyboardMarkup::new(rows),
+                                ));
+                            req.await?;
+                        }
                     }
                     Err(e) => {
                         warn!(">> EMBY: playlist failed: {}", e);

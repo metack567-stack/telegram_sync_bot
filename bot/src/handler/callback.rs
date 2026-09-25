@@ -1,6 +1,6 @@
 use crate::{
     context::Context,
-    emby::PendingEmby,
+    emby::{PendingEmby, PlaylistCtx},
     storage::MyStorage,
 };
 use anyhow::Result;
@@ -635,67 +635,31 @@ async fn handle_playlist_cb(
     match parts.get(1) {
         Some(&"show") => {
             let Some(playlist) = ctx.playlist.lock().clone() else {
-                edit_message(&bot, chat_id, msg_id, "❌ 未设置歌单，先用 /playlist <歌单名> 创建").await;
+                edit_message(&bot, chat_id, msg_id, "❌ 未设置歌单，先用 /playlist 选择或创建").await;
+                return Ok(());
+            };
+            render_playlist_songs(&bot, &ctx, chat_id, msg_id, &playlist).await;
+        }
+        Some(&"open") => {
+            // 从 /playlist 歌单列表点按钮打开：playlist:open:<id>
+            let Some(id) = parts.get(2).map(|s| s.to_string()) else {
                 return Ok(());
             };
             let Some(emby) = ctx.emby.clone() else {
                 edit_message(&bot, chat_id, msg_id, "Emby 联动未启用").await;
                 return Ok(());
             };
-            let songs = match emby.playlist_items(&playlist.id).await {
-                Ok(s) => s,
+            let info = match emby.get_playlist(&id).await {
+                Ok(i) => i,
                 Err(e) => {
                     edit_message(&bot, chat_id, msg_id, format!("❌ 读取歌单失败：{}", e)).await;
                     return Ok(());
                 }
             };
-            if songs.is_empty() {
-                edit_message(
-                    &bot,
-                    chat_id,
-                    msg_id,
-                    format!(
-                        "📋 歌单「{}」还是空的。用 /music 下载试听后 📥入库，再点 ➕ 加入歌单",
-                        playlist.name
-                    ),
-                )
-                .await;
-                return Ok(());
-            }
-            ctx.playlist_pending.lock().insert(
-                chat_id,
-                PendingEmby {
-                    songs: songs.clone(),
-                    created: Instant::now(),
-                },
-            );
-            let mut text = format!(
-                "📋 歌单「{}」（{} 首），点序号播放（60 秒内有效）：\n",
-                playlist.name,
-                songs.len()
-            );
-            for (i, s) in songs.iter().enumerate() {
-                let artist = if s.Artists.is_empty() {
-                    "未知歌手".to_string()
-                } else {
-                    s.Artists.join("/")
-                };
-                text.push_str(&format!("{}. {} - {}\n", i + 1, s.Name, artist));
-            }
-            // 序号按钮横向一排（每行最多 8 个，多了自动换行）
-            let buttons: Vec<InlineKeyboardButton> = songs
-                .iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    InlineKeyboardButton::callback(
-                        (i + 1).to_string(),
-                        format!("playlist:play:{}", i),
-                    )
-                })
-                .collect();
-            let rows: Vec<Vec<InlineKeyboardButton>> =
-                buttons.chunks(8).map(|c| c.to_vec()).collect();
-            edit_message_with_kb(&bot, chat_id, msg_id, text, InlineKeyboardMarkup::new(rows)).await;
+            let playlist = PlaylistCtx { id: info.id, name: info.name };
+            ctx.playlist.lock().replace(playlist.clone());
+            info!(">> EMBY: playlist opened {} ({})", playlist.name, playlist.id);
+            render_playlist_songs(&bot, &ctx, chat_id, msg_id, &playlist).await;
         }
         Some(&"play") => {
             let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
@@ -740,6 +704,74 @@ async fn handle_playlist_cb(
         _ => {}
     }
     Ok(())
+}
+
+/// 列出歌单内歌曲并附点播序号按钮（playlist:show 与 playlist:open 共用）。
+async fn render_playlist_songs(
+    bot: &Bot,
+    ctx: &Context,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    playlist: &PlaylistCtx,
+) {
+    let Some(emby) = ctx.emby.clone() else {
+        edit_message(bot, chat_id, msg_id, "Emby 联动未启用").await;
+        return;
+    };
+    let songs = match emby.playlist_items(&playlist.id).await {
+        Ok(s) => s,
+        Err(e) => {
+            edit_message(bot, chat_id, msg_id, format!("❌ 读取歌单失败：{}", e)).await;
+            return;
+        }
+    };
+    if songs.is_empty() {
+        edit_message(
+            bot,
+            chat_id,
+            msg_id,
+            format!(
+                "📋 歌单「{}」还是空的。用 /music 下载试听后 📥入库，再点 ➕ 加入歌单",
+                playlist.name
+            ),
+        )
+        .await;
+        return;
+    }
+    ctx.playlist_pending.lock().insert(
+        chat_id,
+        PendingEmby {
+            songs: songs.clone(),
+            created: Instant::now(),
+        },
+    );
+    let mut text = format!(
+        "📋 歌单「{}」（{} 首），点序号播放（60 秒内有效）：\n",
+        playlist.name,
+        songs.len()
+    );
+    for (i, s) in songs.iter().enumerate() {
+        let artist = if s.Artists.is_empty() {
+            "未知歌手".to_string()
+        } else {
+            s.Artists.join("/")
+        };
+        text.push_str(&format!("{}. {} - {}\n", i + 1, s.Name, artist));
+    }
+    // 序号按钮横向一排（每行最多 8 个，多了自动换行）
+    let buttons: Vec<InlineKeyboardButton> = songs
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            InlineKeyboardButton::callback(
+                (i + 1).to_string(),
+                format!("playlist:play:{}", i),
+            )
+        })
+        .collect();
+    let rows: Vec<Vec<InlineKeyboardButton>> =
+        buttons.chunks(8).map(|c| c.to_vec()).collect();
+    edit_message_with_kb(bot, chat_id, msg_id, text, InlineKeyboardMarkup::new(rows)).await;
 }
 
 /// 编辑消息文本（去掉键盘）。

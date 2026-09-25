@@ -39,6 +39,13 @@ pub struct PlaylistCtx {
     pub name: String,
 }
 
+/// Emby 歌单基本信息（列表选择用）。
+#[derive(Debug, Clone)]
+pub struct PlaylistInfo {
+    pub id: String,
+    pub name: String,
+}
+
 /// Emby 后端 HTTP 客户端（只读查询 + 库刷新 + 歌单管理，api_key 认证）。
 /// 注意：Emby 返回的 Path 是 Emby 容器视角的路径；本 bot 的 MUSIC_DIR
 /// 与 Emby 挂载同一宿主音乐库且同为 `/music` 时路径可直接使用。
@@ -319,5 +326,64 @@ impl EmbyClient {
             .filter_map(|it| serde_json::from_value(it).ok())
             .collect();
         Ok(songs)
+    }
+
+    /// 列出 Emby 中全部播放列表（歌单），供 /playlist 无参数选择。
+    pub async fn list_playlists(&self) -> Result<Vec<PlaylistInfo>> {
+        let resp = self
+            .http
+            .get(format!("{}/Items", self.base))
+            .query(&[
+                ("Recursive", "true"),
+                ("IncludeItemTypes", "Playlist"),
+                ("Limit", "100"),
+                ("api_key", &self.api_key),
+            ])
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("emby playlists -> HTTP {status}: {text}"));
+        }
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("emby playlists bad json: {e}"))?;
+        let mut out = Vec::new();
+        for it in json.get("Items").and_then(|i| i.as_array()).unwrap_or(&vec![]) {
+            let id = it.get("Id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let name = it.get("Name").and_then(|v| v.as_str()).map(|s| s.to_string());
+            if let (Some(id), Some(name)) = (id, name) {
+                out.push(PlaylistInfo { id, name });
+            }
+        }
+        Ok(out)
+    }
+
+    /// 按 Id 查歌单基本信息（GET /Playlists/{id}），用于回调里反查名字。
+    pub async fn get_playlist(&self, playlist_id: &str) -> Result<PlaylistInfo> {
+        let resp = self
+            .http
+            .get(format!("{}/Playlists/{}", self.base, playlist_id))
+            .query(&[("api_key", &self.api_key)])
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("emby playlist get -> HTTP {status}: {text}"));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("emby playlist get bad json: {e}: {text}"))?;
+        let id = v
+            .get("Id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("no playlist id in response: {text}"))?;
+        let name = v
+            .get("Name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("未知歌单")
+            .to_string();
+        Ok(PlaylistInfo { id, name })
     }
 }
