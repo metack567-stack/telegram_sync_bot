@@ -27,6 +27,8 @@ Note: In this file, do not use the hard wrap in the middle of a sentence for com
 - photo caption 文件名截断到 80 字符，避免超长文件名
 - 新增 sqmusic 音乐联动 `/music <歌名>` 命令：搜索（默认酷我源）→ 回复数字选歌 → sqmusic 后台下载到音乐库（Emby 兼容目录）→ 音频文件回传 Telegram（`SQMUSIC_URL` / `SQMUSIC_USER` / `SQMUSIC_PASS` / `MUSIC_DIR` 环境变量控制）
 - 新增 Emby 音乐库下载前预查：`/music` 下载前先查 Emby（`EMBY_URL` / `EMBY_API_KEY`），音乐库已有该歌则直接回传现有文件、不重复下载；Emby 未配置或查询失败时回退到本地目录预查
+- 新增 `/emby <歌名>` 命令：搜索 Emby 音乐库、序号按钮点播，把库里的音频文件直接发回 Telegram（60 秒内有效）
+- `/music` 下载完成新歌后自动触发 Emby 音乐库扫描（`Library/Refresh`），无需手动刷新
 
 ### Changed
 

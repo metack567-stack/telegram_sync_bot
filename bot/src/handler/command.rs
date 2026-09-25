@@ -1,6 +1,7 @@
 use super::MyDialogue;
 use crate::{
     context::Context,
+    emby::PendingEmby,
     sqm::PendingMusic,
     storage::MyStorage,
     utils::gen_key,
@@ -39,6 +40,8 @@ enum Command {
     Clear,
     #[command(description = "Search and download music via sqmusic, e.g. /music 晴天")]
     Music(String),
+    #[command(description = "Search music on Emby library, e.g. /emby 晴天")]
+    Emby(String),
 }
 
 pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
@@ -191,6 +194,72 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                     .enumerate()
                     .map(|(i, _)| {
                         InlineKeyboardButton::callback((i + 1).to_string(), format!("music:pick:{}", i))
+                    })
+                    .collect();
+                let mut req = bot.send_message(msg.chat.id, text);
+                req.payload_mut().reply_markup = Some(teloxide::types::ReplyMarkup::InlineKeyboard(
+                    InlineKeyboardMarkup::new(vec![row]),
+                ));
+                req.await?;
+                Ok(())
+            },
+        ))
+        .branch(case![Command::Emby(keyword)].endpoint(
+            async |bot: Bot, msg: Message, ctx: Context, keyword: String| {
+                let Some(emby) = &ctx.emby else {
+                    bot.send_message(
+                        msg.chat.id,
+                        "Emby 联动未启用（服务端未配置 EMBY_URL/EMBY_API_KEY）",
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                let keyword = keyword.trim();
+                if keyword.is_empty() {
+                    bot.send_message(msg.chat.id, "用法：/emby <歌名> [歌手]，例如 /emby 晴天 周杰伦")
+                        .await?;
+                    return Ok(());
+                }
+                let songs = match emby.search_songs(&keyword, 8).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(">> EMBY: search failed: {}", e);
+                        bot.send_message(msg.chat.id, format!("Emby 查询失败：{}", e)).await?;
+                        return Ok(());
+                    }
+                };
+                if songs.is_empty() {
+                    bot.send_message(msg.chat.id, format!("Emby 音乐库没有「{}」相关歌曲", keyword))
+                        .await?;
+                    return Ok(());
+                }
+                let top = songs.into_iter().take(8).collect::<Vec<_>>();
+                ctx.emby_pending.lock().insert(
+                    msg.chat.id,
+                    PendingEmby {
+                        songs: top.clone(),
+                        created: Instant::now(),
+                    },
+                );
+                let mut text = format!(
+                    "🎵 Emby 音乐库「{}」相关，点下方序号发送（60 秒内有效）：\n",
+                    keyword
+                );
+                for (i, s) in top.iter().enumerate() {
+                    let artist = if s.Artists.is_empty() {
+                        "未知歌手".to_string()
+                    } else {
+                        s.Artists.join("/")
+                    };
+                    let album = s.Album.clone().unwrap_or_else(|| "未知专辑".to_string());
+                    text.push_str(&format!("{}. {} - {}《{}》\n", i + 1, s.Name, artist, album));
+                }
+                // 序号按钮横向一排，点一下直接发送该歌
+                let row: Vec<InlineKeyboardButton> = top
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        InlineKeyboardButton::callback((i + 1).to_string(), format!("emby:pick:{}", i))
                     })
                     .collect();
                 let mut req = bot.send_message(msg.chat.id, text);

@@ -430,10 +430,18 @@ async fn try_download_and_send(
             }
         });
     let fname = send_audio_with_title(bot, chat_id, &file, title, performer).await?;
+    // 新歌已写入音乐库，触发 Emby 扫描让新歌立即可见（失败不阻断）
+    if let Some(emby) = emby.as_ref() {
+        if let Err(e) = emby.refresh_library().await {
+            warn!(">> EMBY: refresh after download failed: {}", e);
+        } else {
+            info!(">> EMBY: library refresh triggered after download");
+        }
+    }
     if found.format_ok {
         bot.send_message(
             chat_id,
-            format!("✅ 下载完成：{}〔{}〕，已同步到音乐库", fname, br.replace('_', " ")),
+            format!("✅ 下载完成：{}〔{}〕，已同步到 Emby 音乐库", fname, br.replace('_', " ")),
         )
         .await?;
     } else {

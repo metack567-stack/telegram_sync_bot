@@ -3,12 +3,13 @@ use crate::{
     storage::MyStorage,
 };
 use anyhow::Result;
+use std::path::PathBuf;
 use teloxide::{
     Bot,
     dispatching::{UpdateFilterExt as _, UpdateHandler},
     prelude::Requester as _,
     requests::HasPayload as _,
-    types::{CallbackQuery, ChatId, Update},
+    types::{CallbackQuery, ChatId, InputFile, Update},
 };
 use tracing::{info, warn};
 
@@ -26,7 +27,11 @@ async fn handle(
     let _ = bot.answer_callback_query(q.id.clone()).await;
 
     let data = q.data.clone().unwrap_or_default();
-    if !data.starts_with("clear:") && !data.starts_with("music:dl:") && !data.starts_with("music:pick:") {
+    if !data.starts_with("clear:")
+        && !data.starts_with("music:dl:")
+        && !data.starts_with("music:pick:")
+        && !data.starts_with("emby:pick:")
+    {
         return Ok(());
     }
     // owner-only: anyone who can see the message could tap the button otherwise
@@ -47,6 +52,7 @@ async fn handle(
     match data.split(':').next().unwrap_or_default() {
         "clear" => handle_clear(bot, chat_id, msg_id, data, storage).await,
         "music" => handle_music(bot, ctx, chat_id, msg_id, data).await,
+        "emby" => handle_emby(bot, ctx, chat_id, msg_id, data).await,
         _ => Ok(()),
     }
 }
@@ -222,5 +228,81 @@ async fn handle_music_dl(
             }
         });
     }
+    Ok(())
+}
+
+/// Emby 点播回调入口：emby:pick:<idx>。
+async fn handle_emby(
+    bot: Bot,
+    ctx: Context,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    data: String,
+) -> Result<()> {
+    let parts: Vec<&str> = data.split(':').collect();
+    if parts.get(1) == Some(&"pick") {
+        handle_emby_pick(bot, ctx, chat_id, msg_id, &parts).await
+    } else {
+        Ok(())
+    }
+}
+
+/// 点击 Emby 候选歌曲按钮：校验选择后把库里的音频文件发回。
+async fn handle_emby_pick(
+    bot: Bot,
+    ctx: Context,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    parts: &[&str],
+) -> Result<()> {
+    let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
+        return Ok(());
+    };
+    let pending = ctx.emby_pending.lock().get(&chat_id).cloned();
+    let Some(pending) = pending else {
+        let mut req = bot.edit_message_text(chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索");
+        req.payload_mut().reply_markup = None;
+        req.await.ok();
+        return Ok(());
+    };
+    if pending.expired() {
+        ctx.emby_pending.lock().remove(&chat_id);
+        let mut req = bot.edit_message_text(chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索");
+        req.payload_mut().reply_markup = None;
+        req.await.ok();
+        return Ok(());
+    }
+    let Some(song) = pending.songs.get(idx).cloned() else {
+        return Ok(());
+    };
+    ctx.emby_pending.lock().remove(&chat_id);
+    let path = PathBuf::from(&song.Path);
+    if !path.exists() {
+        let mut req = bot.edit_message_text(
+            chat_id,
+            msg_id,
+            format!("⚠️ 文件不可见：{}（挂载不一致？）", song.Path),
+        );
+        req.payload_mut().reply_markup = None;
+        req.await.ok();
+        return Ok(());
+    }
+    let artist = if song.Artists.is_empty() {
+        "未知歌手".to_string()
+    } else {
+        song.Artists.join("/")
+    };
+    let mut req = bot.edit_message_text(
+        chat_id,
+        msg_id,
+        format!("📤 正在发送：{} - {}", song.Name, artist),
+    );
+    req.payload_mut().reply_markup = None;
+    req.await.ok();
+    info!(">> EMBY: play {} -> {}", song.Name, song.Path);
+    let mut req = bot.send_audio(chat_id, InputFile::file(&path));
+    req.payload_mut().title = Some(song.Name.clone());
+    req.payload_mut().performer = Some(artist);
+    req.await?;
     Ok(())
 }

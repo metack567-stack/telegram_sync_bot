@@ -203,6 +203,7 @@ impl Cli {
                                 }
                             }
                         },
+                        emby_pending: Mutex::new(HashMap::new()),
                         music_pending: Mutex::new(HashMap::new()),
                         fav_score_limit,
                         dislike_score_limit,
@@ -231,6 +232,7 @@ impl Cli {
                         BotCommand::new("bypasskey", "Print bypass key"),
                         BotCommand::new("clear", "Clear all downloaded files in normal directory"),
                         BotCommand::new("music", "Search and download music via sqmusic, e.g. /music 晴天"),
+                        BotCommand::new("emby", "Search music on Emby library, e.g. /emby 晴天"),
                     ];
                     match bot.set_my_commands(commands).await {
                         Ok(_) => info!(">> INIT: command menu registered"),
@@ -310,6 +312,7 @@ impl Cli {
                         emby: None,
                         music_dir: None,
                         music_pending: Mutex::new(HashMap::new()),
+                        emby_pending: Mutex::new(HashMap::new()),
                         hard_link: AtomicBool::new(true), // ensure try hard link once
                     }),
                 };
