@@ -358,6 +358,7 @@ async fn try_download_and_send(
                     } else {
                         song.artistName.join("/")
                     };
+                    info!(">> EMBY: library hit {} -> {}", song.name, found.Path);
                     let fname = send_audio_with_title(bot, chat_id, &path, title, performer).await?;
                     bot.send_message(
                         chat_id,
@@ -377,6 +378,7 @@ async fn try_download_and_send(
     }
     // 本地预查：音乐库已有该歌（sqmusic 判重会跳过下载），直接发回已有文件
     if let Some(found) = crate::sqm::find_in_library(music_dir, song, prefer_ext) {
+        info!(">> SQMUSIC: local library hit {}", found.path.display());
         let title = song.name.clone();
         let performer = if song.artistName.is_empty() {
             "未知歌手".to_string()
