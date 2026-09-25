@@ -1,7 +1,7 @@
 use super::MyDialogue;
 use crate::{
     context::Context,
-    emby::PendingEmby,
+    emby::{PendingEmby, PlaylistCtx},
     sqm::PendingMusic,
     storage::MyStorage,
     utils::gen_key,
@@ -42,6 +42,8 @@ enum Command {
     Music(String),
     #[command(description = "Search music on Emby library, e.g. /emby 晴天")]
     Emby(String),
+    #[command(description = "Create/open an Emby playlist, e.g. /playlist 我的歌单")]
+    Playlist(String),
 }
 
 pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
@@ -254,19 +256,90 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                     let album = s.Album.clone().unwrap_or_else(|| "未知专辑".to_string());
                     text.push_str(&format!("{}. {} - {}《{}》\n", i + 1, s.Name, artist, album));
                 }
-                // 序号按钮横向一排，点一下直接发送该歌
-                let row: Vec<InlineKeyboardButton> = top
+                // 第一行：序号按钮横向一排，点一下直接发送该歌
+                let mut rows: Vec<Vec<InlineKeyboardButton>> = vec![top
                     .iter()
                     .enumerate()
                     .map(|(i, _)| {
                         InlineKeyboardButton::callback((i + 1).to_string(), format!("emby:pick:{}", i))
                     })
-                    .collect();
+                    .collect()];
+                // 第二行：➕ 把歌加入当前 Emby 歌单（已设置歌单时显示）
+                if let Some(p) = ctx.playlist.lock().clone() {
+                    rows.push(
+                        top.iter()
+                            .enumerate()
+                            .map(|(i, _)| {
+                                InlineKeyboardButton::callback(
+                                    format!("➕{}", i + 1),
+                                    format!("emby:add:{}", i),
+                                )
+                            })
+                            .collect(),
+                    );
+                    text.push_str(&format!("\n点 ➕ 把歌加入歌单「{}」", p.name));
+                } else {
+                    text.push_str("\n（用 /playlist <歌单名> 创建歌单后，可一键把歌加入 Emby 歌单）");
+                }
                 let mut req = bot.send_message(msg.chat.id, text);
                 req.payload_mut().reply_markup = Some(teloxide::types::ReplyMarkup::InlineKeyboard(
-                    InlineKeyboardMarkup::new(vec![row]),
+                    InlineKeyboardMarkup::new(rows),
                 ));
                 req.await?;
+                Ok(())
+            },
+        ))
+        .branch(case![Command::Playlist(name)].endpoint(
+            async |bot: Bot, msg: Message, ctx: Context, name: String| {
+                let Some(emby) = &ctx.emby else {
+                    bot.send_message(msg.chat.id, "Emby 联动未启用（未配置 EMBY_URL/EMBY_API_KEY）")
+                        .await?;
+                    return Ok(());
+                };
+                let name = name.trim();
+                if name.is_empty() {
+                    let cur = ctx.playlist.lock().clone();
+                    match cur {
+                        Some(p) => {
+                            bot.send_message(
+                                msg.chat.id,
+                                format!(
+                                    "当前歌单：「{}」（Emby Id {}）。用 /playlist <歌单名> 切换或新建",
+                                    p.name, p.id
+                                ),
+                            )
+                            .await?;
+                        }
+                        None => {
+                            bot.send_message(
+                                msg.chat.id,
+                                "用法：/playlist <歌单名>，例如 /playlist 我的歌单\n创建后在 /emby 搜索结果点 ➕ 即可把歌加入",
+                            )
+                            .await?;
+                        }
+                    }
+                    return Ok(());
+                }
+                match emby.find_or_create_playlist(&name).await {
+                    Ok(id) => {
+                        ctx.playlist
+                            .lock()
+                            .replace(PlaylistCtx { id: id.clone(), name: name.to_string() });
+                        info!(">> EMBY: playlist ready {} ({})", name, id);
+                        bot.send_message(
+                            msg.chat.id,
+                            format!(
+                                "✅ 歌单「{}」已就绪（Emby 播放列表 Id {}）。\n现在去 /emby <歌名> 搜索，点 ➕ 即可加入歌曲",
+                                name, id
+                            ),
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        warn!(">> EMBY: playlist failed: {}", e);
+                        bot.send_message(msg.chat.id, format!("❌ 歌单操作失败：{}", e)).await?;
+                    }
+                }
                 Ok(())
             },
         ))

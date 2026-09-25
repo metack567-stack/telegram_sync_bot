@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::{collections::HashMap, collections::HashSet, path::PathBuf, sync::Arc};
 use teloxide::types::{ChatId, UserId};
 
-use crate::emby::{EmbyClient, PendingEmby};
+use crate::emby::{EmbyClient, PendingEmby, PlaylistCtx};
 use crate::sqm::{PendingMusic, SqmusicClient};
 
 #[derive(Debug, Clone)]
@@ -43,6 +43,8 @@ pub struct ContextInner {
     pub music_pending: Mutex<HashMap<ChatId, PendingMusic>>,
     // chat_id -> emby library songs waiting for user to pick (/emby, expires in 60s)
     pub emby_pending: Mutex<HashMap<ChatId, PendingEmby>>,
+    // 当前打开的 Emby 歌单（/playlist 设置，/emby 搜索可一键加入）
+    pub playlist: Mutex<Option<PlaylistCtx>>,
 
     pub hard_link: AtomicBool,
 }

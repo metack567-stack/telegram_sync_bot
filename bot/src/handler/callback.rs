@@ -31,6 +31,7 @@ async fn handle(
         && !data.starts_with("music:dl:")
         && !data.starts_with("music:pick:")
         && !data.starts_with("emby:pick:")
+        && !data.starts_with("emby:add:")
     {
         return Ok(());
     }
@@ -240,10 +241,10 @@ async fn handle_emby(
     data: String,
 ) -> Result<()> {
     let parts: Vec<&str> = data.split(':').collect();
-    if parts.get(1) == Some(&"pick") {
-        handle_emby_pick(bot, ctx, chat_id, msg_id, &parts).await
-    } else {
-        Ok(())
+    match parts.get(1) {
+        Some(&"pick") => handle_emby_pick(bot, ctx, chat_id, msg_id, &parts).await,
+        Some(&"add") => handle_emby_add(bot, ctx, chat_id, msg_id, &parts).await,
+        _ => Ok(()),
     }
 }
 
@@ -304,5 +305,66 @@ async fn handle_emby_pick(
     req.payload_mut().title = Some(song.Name.clone());
     req.payload_mut().performer = Some(artist);
     req.await?;
+    Ok(())
+}
+
+/// 点击 ➕ 按钮：把选中的 Emby 歌曲加入当前歌单（/playlist 创建/打开）。
+async fn handle_emby_add(
+    bot: Bot,
+    ctx: Context,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    parts: &[&str],
+) -> Result<()> {
+    let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
+        return Ok(());
+    };
+    let pending = ctx.emby_pending.lock().get(&chat_id).cloned();
+    let Some(pending) = pending else {
+        let mut req = bot.edit_message_text(chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索");
+        req.payload_mut().reply_markup = None;
+        req.await.ok();
+        return Ok(());
+    };
+    if pending.expired() {
+        ctx.emby_pending.lock().remove(&chat_id);
+        let mut req = bot.edit_message_text(chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索");
+        req.payload_mut().reply_markup = None;
+        req.await.ok();
+        return Ok(());
+    }
+    let Some(song) = pending.songs.get(idx).cloned() else {
+        return Ok(());
+    };
+    let Some(playlist) = ctx.playlist.lock().clone() else {
+        let mut req = bot.edit_message_text(chat_id, msg_id, "❌ 未设置歌单，先用 /playlist <歌单名> 创建");
+        req.payload_mut().reply_markup = None;
+        req.await.ok();
+        return Ok(());
+    };
+    let Some(emby) = ctx.emby.clone() else {
+        return Ok(());
+    };
+    let mut req = bot.edit_message_text(
+        chat_id,
+        msg_id,
+        format!("➕ 正在加入歌单「{}」：{}", playlist.name, song.Name),
+    );
+    req.payload_mut().reply_markup = None;
+    req.await.ok();
+    match emby.add_to_playlist(&playlist.id, &song.Id).await {
+        Ok(()) => {
+            info!(">> EMBY: add {} to playlist {} ({})", song.Name, playlist.name, playlist.id);
+            bot.send_message(
+                chat_id,
+                format!("➕ 已加入歌单「{}」：{}", playlist.name, song.Name),
+            )
+            .await?;
+        }
+        Err(e) => {
+            warn!(">> EMBY: add to playlist failed: {}", e);
+            bot.send_message(chat_id, format!("❌ 加入歌单失败：{}", e)).await?;
+        }
+    }
     Ok(())
 }

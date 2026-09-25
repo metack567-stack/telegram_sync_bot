@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use core::fmt;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -10,11 +10,11 @@ use tracing::debug;
 #[derive(Debug, Clone, Deserialize)]
 #[allow(non_snake_case)]
 pub struct EmbySong {
+    pub Id: String,
     pub Name: String,
     #[serde(default)]
     pub Artists: Vec<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub Album: Option<String>,
     pub Path: String,
 }
@@ -32,14 +32,22 @@ impl PendingEmby {
     }
 }
 
-/// Emby 后端 HTTP 客户端（只读查询 + 库刷新，api_key 认证）。
-/// 用于下载前预查音乐库是否已有该歌，以及 /emby 查库点播。
+/// 当前选中的 Emby 歌单（/playlist 命令创建/打开，/emby 搜索结果可一键加入）。
+#[derive(Debug, Clone)]
+pub struct PlaylistCtx {
+    pub id: String,
+    pub name: String,
+}
+
+/// Emby 后端 HTTP 客户端（只读查询 + 库刷新 + 歌单管理，api_key 认证）。
 /// 注意：Emby 返回的 Path 是 Emby 容器视角的路径；本 bot 的 MUSIC_DIR
 /// 与 Emby 挂载同一宿主音乐库且同为 `/music` 时路径可直接使用。
 pub struct EmbyClient {
     base: String,
     api_key: String,
     http: reqwest::Client,
+    /// 歌单操作需要的用户 Id（懒获取并缓存；创建/加歌都用该用户，保证权限一致）
+    user_id: Mutex<Option<String>>,
 }
 
 impl fmt::Debug for EmbyClient {
@@ -62,6 +70,7 @@ impl EmbyClient {
             base,
             api_key,
             http,
+            user_id: Mutex::new(None),
         })
     }
 
@@ -157,6 +166,126 @@ impl EmbyClient {
         if !status.is_success() {
             let text = resp.text().await?;
             return Err(anyhow!("emby refresh -> HTTP {status}: {text}"));
+        }
+        Ok(())
+    }
+
+    /// 歌单操作用的用户 Id：懒获取（GET /Users 取第一个用户）并缓存。
+    /// 创建歌单/加歌都使用该用户，保证与歌单所有者的权限一致。
+    async fn user_id(&self) -> Result<String> {
+        if let Some(uid) = self.user_id.lock().map(|g| g.clone()).unwrap_or(None) {
+            return Ok(uid);
+        }
+        let resp = self
+            .http
+            .get(format!("{}/Users", self.base))
+            .query(&[("api_key", &self.api_key)])
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("emby users -> HTTP {status}: {text}"));
+        }
+        let users: Vec<serde_json::Value> = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("emby users bad json: {e}"))?;
+        let uid = users
+            .first()
+            .and_then(|u| u.get("Id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("no emby user found"))?;
+        if let Ok(mut g) = self.user_id.lock() {
+            *g = Some(uid.clone());
+        }
+        debug!(user_id = %uid, "emby user id cached");
+        Ok(uid)
+    }
+
+    /// 查找同名歌单（忽略大小写），返回其 Id；未找到返回 Ok(None)。
+    async fn find_playlist(&self, name: &str) -> Result<Option<String>> {
+        let resp = self
+            .http
+            .get(format!("{}/Items", self.base))
+            .query(&[
+                ("Recursive", "true"),
+                ("IncludeItemTypes", "Playlist"),
+                ("SearchTerm", name),
+                ("Limit", "10"),
+                ("api_key", &self.api_key),
+            ])
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("emby playlist query -> HTTP {status}: {text}"));
+        }
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("emby playlist bad json: {e}"))?;
+        let name_l = name.trim().to_lowercase();
+        for it in json.get("Items").and_then(|i| i.as_array()).unwrap_or(&vec![]) {
+            if it.get("Name").and_then(|v| v.as_str()).is_some_and(|n| n.to_lowercase() == name_l) {
+                if let Some(id) = it.get("Id").and_then(|v| v.as_str()) {
+                    return Ok(Some(id.to_string()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// 创建歌单（POST /Playlists?Name=&UserId=），返回歌单 Id。
+    pub async fn create_playlist(&self, name: &str) -> Result<String> {
+        let uid = self.user_id().await?;
+        let resp = self
+            .http
+            .post(format!("{}/Playlists", self.base))
+            .query(&[
+                ("Name", name),
+                ("Ids", ""),
+                ("UserId", &uid),
+                ("api_key", &self.api_key),
+            ])
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("emby create playlist -> HTTP {status}: {text}"));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("emby create playlist bad json: {e}: {text}"))?;
+        v.get("Id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("no playlist id in response: {text}"))
+    }
+
+    /// 查找或创建同名歌单，返回歌单 Id（查找优先，不存在则创建）。
+    pub async fn find_or_create_playlist(&self, name: &str) -> Result<String> {
+        if let Some(id) = self.find_playlist(name).await? {
+            return Ok(id);
+        }
+        self.create_playlist(name).await
+    }
+
+    /// 把一首歌（Emby item Id）加入歌单。加歌必须带歌单所有者的 UserId。
+    pub async fn add_to_playlist(&self, playlist_id: &str, song_id: &str) -> Result<()> {
+        let uid = self.user_id().await?;
+        let resp = self
+            .http
+            .post(format!("{}/Playlists/{}/Items", self.base, playlist_id))
+            .query(&[
+                ("Ids", song_id),
+                ("UserId", &uid),
+                ("api_key", &self.api_key),
+            ])
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            return Err(anyhow!("emby add to playlist -> HTTP {status}: {text}"));
         }
         Ok(())
     }
