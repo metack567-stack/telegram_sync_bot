@@ -246,8 +246,7 @@ impl Cli {
                         BotCommand::new("toggle", "Switch paused/active state, renew to rotate key"),
                         BotCommand::new("bypasskey", "Print bypass key"),
                         BotCommand::new("clear", "Clear all downloaded files in normal directory"),
-                        BotCommand::new("music", "Search and download music via sqmusic, e.g. /music 晴天"),
-                        BotCommand::new("emby", "Search music on Emby library, e.g. /emby 晴天"),
+                        BotCommand::new("music", "音乐库管理器：搜库内歌曲，未命中可在线找歌入库，e.g. /music 晴天"),
                         BotCommand::new("playlist", "Create/open an Emby playlist, e.g. /playlist 我的歌单"),
                         BotCommand::new("favs", "List your favorited music"),
                     ];
