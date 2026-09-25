@@ -42,7 +42,7 @@ jobs:
       - name: Build and push bot image
         uses: docker/build-push-action@v5
         with:
-          context: ./bot
+          context: .
           file: ./bot/Containerfile
           target: bot
           push: true
