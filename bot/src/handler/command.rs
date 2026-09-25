@@ -190,17 +190,34 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                         br
                     ));
                 }
-                // 序号按钮横向一排，点一下直接进入该歌的音质选择
-                let row: Vec<InlineKeyboardButton> = top
+                // 第一行：序号按钮横向一排，点一下直接进入该歌的音质选择
+                let mut rows: Vec<Vec<InlineKeyboardButton>> = vec![top
                     .iter()
                     .enumerate()
                     .map(|(i, _)| {
                         InlineKeyboardButton::callback((i + 1).to_string(), format!("music:pick:{}", i))
                     })
-                    .collect();
+                    .collect()];
+                // 第二行：➕ 把歌加入当前 Emby 歌单（已设置歌单时显示）
+                if let Some(p) = ctx.playlist.lock().clone() {
+                    rows.push(
+                        top.iter()
+                            .enumerate()
+                            .map(|(i, _)| {
+                                InlineKeyboardButton::callback(
+                                    format!("➕{}", i + 1),
+                                    format!("music:add:{}", i),
+                                )
+                            })
+                            .collect(),
+                    );
+                    text.push_str(&format!("\n点 ➕ 把歌加入歌单「{}」", p.name));
+                } else {
+                    text.push_str("\n（用 /playlist <歌单名> 创建歌单后，可一键把歌加入 Emby 歌单）");
+                }
                 let mut req = bot.send_message(msg.chat.id, text);
                 req.payload_mut().reply_markup = Some(teloxide::types::ReplyMarkup::InlineKeyboard(
-                    InlineKeyboardMarkup::new(vec![row]),
+                    InlineKeyboardMarkup::new(rows),
                 ));
                 req.await?;
                 Ok(())

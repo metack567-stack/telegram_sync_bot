@@ -30,6 +30,7 @@ async fn handle(
     if !data.starts_with("clear:")
         && !data.starts_with("music:dl:")
         && !data.starts_with("music:pick:")
+        && !data.starts_with("music:add:")
         && !data.starts_with("emby:pick:")
         && !data.starts_with("emby:add:")
     {
@@ -109,6 +110,7 @@ async fn handle_music(
     match parts.get(1) {
         Some(&"pick") => handle_music_pick(bot, ctx, chat_id, msg_id, &parts).await,
         Some(&"dl") => handle_music_dl(bot, ctx, chat_id, msg_id, &parts).await,
+        Some(&"add") => handle_music_add(bot, ctx, chat_id, msg_id, &parts).await,
         _ => Ok(()),
     }
 }
@@ -364,6 +366,88 @@ async fn handle_emby_add(
         Err(e) => {
             warn!(">> EMBY: add to playlist failed: {}", e);
             bot.send_message(chat_id, format!("❌ 加入歌单失败：{}", e)).await?;
+        }
+    }
+    Ok(())
+}
+
+/// 点击 /music 候选列表的 ➕ 按钮：把选中的 sqmusic 歌曲加入当前 Emby 歌单。
+/// 歌曲需已在 Emby 音乐库（已下载并被扫描）；未入库时提示先下载。
+async fn handle_music_add(
+    bot: Bot,
+    ctx: Context,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    parts: &[&str],
+) -> Result<()> {
+    let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
+        return Ok(());
+    };
+    let pending = ctx.music_pending.lock().get(&chat_id).cloned();
+    let Some(pending) = pending else {
+        let mut req = bot.edit_message_text(chat_id, msg_id, "❌ 选择已过期，请重新 /music 搜索");
+        req.payload_mut().reply_markup = None;
+        req.await.ok();
+        return Ok(());
+    };
+    if pending.expired() {
+        ctx.music_pending.lock().remove(&chat_id);
+        let mut req = bot.edit_message_text(chat_id, msg_id, "❌ 选择已过期，请重新 /music 搜索");
+        req.payload_mut().reply_markup = None;
+        req.await.ok();
+        return Ok(());
+    }
+    let Some(song) = pending.songs.get(idx).cloned() else {
+        return Ok(());
+    };
+    let Some(playlist) = ctx.playlist.lock().clone() else {
+        let mut req = bot.edit_message_text(chat_id, msg_id, "❌ 未设置歌单，先用 /playlist <歌单名> 创建");
+        req.payload_mut().reply_markup = None;
+        req.await.ok();
+        return Ok(());
+    };
+    let Some(emby) = ctx.emby.clone() else {
+        return Ok(());
+    };
+    let mut req = bot.edit_message_text(
+        chat_id,
+        msg_id,
+        format!("🔎 正在查询音乐库：{} ...", song.name),
+    );
+    req.payload_mut().reply_markup = None;
+    req.await.ok();
+    let artist = if song.artistName.is_empty() {
+        String::new()
+    } else {
+        song.artistName.join(" ")
+    };
+    match emby.find_song(&song.name, (!artist.is_empty()).then_some(artist.as_str())).await {
+        Ok(Some(found)) => match emby.add_to_playlist(&playlist.id, &found.Id).await {
+            Ok(()) => {
+                info!(">> EMBY: add {} to playlist {} ({})", found.Name, playlist.name, playlist.id);
+                bot.send_message(
+                    chat_id,
+                    format!("➕ 已加入歌单「{}」：{}", playlist.name, found.Name),
+                )
+                .await?;
+            }
+            Err(e) => {
+                warn!(">> EMBY: add to playlist failed: {}", e);
+                bot.send_message(chat_id, format!("❌ 加入歌单失败：{}", e)).await?;
+            }
+        },
+        Ok(None) => {
+            bot.send_message(
+                chat_id,
+                format!(
+                    "⚠️ 「{}」还没在 Emby 音乐库（未下载或未扫描完成）。先 /music 下载，等扫描完成后可再加入歌单",
+                    song.name
+                ),
+            )
+            .await?;
+        }
+        Err(e) => {
+            bot.send_message(chat_id, format!("❌ 查询音乐库失败：{}", e)).await?;
         }
     }
     Ok(())

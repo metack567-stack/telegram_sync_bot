@@ -30,6 +30,7 @@ Note: In this file, do not use the hard wrap in the middle of a sentence for com
 - 新增 `/emby <歌名>` 命令：搜索 Emby 音乐库、序号按钮点播，把库里的音频文件直接发回 Telegram（60 秒内有效）
 - `/music` 下载完成新歌后自动触发 Emby 音乐库扫描（`Library/Refresh`），无需手动刷新
 - 新增 Emby 歌单：`/playlist <歌单名>` 创建/打开 Emby 播放列表；`/emby` 搜索结果点 ➕ 一键把歌加入歌单（Emby 音乐库直接可播）
+- `/music` 搜索结果同样支持 ➕ 一键加入当前歌单：歌曲需已在 Emby 音乐库（未下载/未扫描时提示先下载）
 
 ### Changed
 
