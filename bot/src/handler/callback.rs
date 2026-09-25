@@ -1,6 +1,6 @@
 use crate::{
     context::Context,
-    emby::{PendingEmby, PendingPlaylistList, PlaylistCtx},
+    emby::{EmbySong, PendingEmby, PendingPlaylistList, PlaylistCtx},
     storage::MyStorage,
 };
 use anyhow::Result;
@@ -37,6 +37,7 @@ async fn handle(
         && !data.starts_with("music:act:")
         && !data.starts_with("emby:pick:")
         && !data.starts_with("emby:add:")
+        && !data.starts_with("emby:del")
         && !data.starts_with("favs:")
         && !data.starts_with("playlist:")
     {
@@ -350,7 +351,7 @@ async fn handle_music_act(
     Ok(())
 }
 
-/// Emby 点播回调入口：emby:pick:<idx> / emby:add:<idx>。
+/// Emby 点播回调入口：emby:pick:<idx> / emby:add:<idx> / emby:del（删除）系列。
 async fn handle_emby(
     bot: Bot,
     ctx: Context,
@@ -362,6 +363,10 @@ async fn handle_emby(
     match parts.get(1) {
         Some(&"pick") => handle_emby_pick(bot, ctx, chat_id, msg_id, &parts).await,
         Some(&"add") => handle_emby_add(bot, ctx, chat_id, msg_id, &parts).await,
+        Some(&"del") => handle_emby_del(bot, ctx, chat_id, msg_id, &parts).await,
+        Some(&"delpick") => handle_emby_delpick(bot, ctx, chat_id, msg_id, &parts).await,
+        Some(&"delconf") => handle_emby_delconf(bot, ctx, chat_id, msg_id, &parts).await,
+        Some(&"delback") => handle_emby_delback(bot, ctx, chat_id, msg_id, &parts).await,
         _ => Ok(()),
     }
 }
@@ -466,6 +471,260 @@ async fn handle_emby_add(
         Err(e) => {
             warn!(">> EMBY: add to playlist failed: {}", e);
             bot.send_message(chat_id, format!("❌ 加入歌单失败：{}", e)).await?;
+        }
+    }
+    Ok(())
+}
+
+/// 渲染 /emby 搜索结果面板（序号播放 + ➕ 加歌单 + 🗑 删除）。
+/// msg_id 为 None 时发新消息（/emby 命令），否则编辑现有消息（删除后返回用）。
+/// keyword 为 None 时用通用标题（返回场景拿不到关键词）。
+pub(crate) async fn render_emby_results(
+    bot: &Bot,
+    ctx: &Context,
+    chat_id: ChatId,
+    msg_id: Option<teloxide::types::MessageId>,
+    keyword: Option<&str>,
+    songs: &[EmbySong],
+) {
+    let top = songs.iter().take(8).cloned().collect::<Vec<_>>();
+    if top.is_empty() {
+        let text = "Emby 音乐库没有相关歌曲";
+        match msg_id {
+            Some(id) => edit_message(bot, chat_id, id, text).await,
+            None => {
+                let _ = bot.send_message(chat_id, text).await;
+            }
+        }
+        return;
+    }
+    ctx.emby_pending.lock().insert(
+        chat_id,
+        PendingEmby {
+            songs: top.clone(),
+            created: Instant::now(),
+        },
+    );
+    let mut text = match keyword {
+        Some(k) => format!("🎵 Emby 音乐库「{}」相关，点下方序号发送（60 秒内有效）：\n", k),
+        None => "🎵 Emby 音乐库搜索结果，点下方序号发送（60 秒内有效）：\n".to_string(),
+    };
+    for (i, s) in top.iter().enumerate() {
+        let artist = if s.Artists.is_empty() {
+            "未知歌手".to_string()
+        } else {
+            s.Artists.join("/")
+        };
+        let album = s.Album.clone().unwrap_or_else(|| "未知专辑".to_string());
+        text.push_str(&format!("{}. {} - {}《{}》\n", i + 1, s.Name, artist, album));
+    }
+    // 第一行：序号按钮横向一排，点一下直接发送该歌
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = vec![top
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            InlineKeyboardButton::callback((i + 1).to_string(), format!("emby:pick:{}", i))
+        })
+        .collect()];
+    // 第二行：➕ 把歌加入当前 Emby 歌单（已设置歌单时显示）
+    if let Some(p) = ctx.playlist.lock().clone() {
+        rows.push(
+            top.iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    InlineKeyboardButton::callback(format!("➕{}", i + 1), format!("emby:add:{}", i))
+                })
+                .collect(),
+        );
+        text.push_str(&format!("\n点 ➕ 把歌加入歌单「{}」", p.name));
+    } else {
+        text.push_str("\n（用 /playlist <歌单名> 创建歌单后，可一键把歌加入 Emby 歌单）");
+    }
+    // 第三行：🗑 从音乐库删除歌曲（两步确认）
+    rows.push(vec![InlineKeyboardButton::callback("🗑 删除歌曲", "emby:del")]);
+    text.push_str("\n点 🗑 删除音乐库中的歌曲（两步确认，会同时删除文件）");
+    let kb = InlineKeyboardMarkup::new(rows);
+    match msg_id {
+        Some(id) => edit_message_with_kb(bot, chat_id, id, text, kb).await,
+        None => {
+            let mut req = bot.send_message(chat_id, text);
+            req.payload_mut().reply_markup =
+                Some(teloxide::types::ReplyMarkup::InlineKeyboard(kb));
+            if let Err(e) = req.await {
+                warn!(">> EMBY: send results failed: {}", e);
+            }
+        }
+    }
+}
+
+/// 🗑 删除歌曲：emby:del（进入序号选择，复用当前 /emby 搜索结果）。
+async fn handle_emby_del(
+    bot: Bot,
+    ctx: Context,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    _parts: &[&str],
+) -> Result<()> {
+    let pending = ctx.emby_pending.lock().get(&chat_id).cloned();
+    let Some(pending) = pending else {
+        edit_message(&bot, chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索").await;
+        return Ok(());
+    };
+    if pending.expired() {
+        ctx.emby_pending.lock().remove(&chat_id);
+        edit_message(&bot, chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索").await;
+        return Ok(());
+    }
+    let songs = pending.songs.clone();
+    ctx.emby_del_pending.lock().insert(
+        chat_id,
+        PendingEmby {
+            songs: songs.clone(),
+            created: Instant::now(),
+        },
+    );
+    let mut text = format!(
+        "🗑 选择要删除的歌曲（共 {} 首，点序号两步确认，会同时删除文件）：\n",
+        songs.len()
+    );
+    for (i, s) in songs.iter().enumerate() {
+        let artist = if s.Artists.is_empty() {
+            "未知歌手".to_string()
+        } else {
+            s.Artists.join("/")
+        };
+        text.push_str(&format!("{}. {} - {}\n", i + 1, s.Name, artist));
+    }
+    let buttons: Vec<InlineKeyboardButton> = songs
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            InlineKeyboardButton::callback((i + 1).to_string(), format!("emby:delpick:{}", i))
+        })
+        .collect();
+    let mut rows: Vec<Vec<InlineKeyboardButton>> =
+        buttons.chunks(8).map(|c| c.to_vec()).collect();
+    rows.push(vec![InlineKeyboardButton::callback("🔙 返回", "emby:delback")]);
+    edit_message_with_kb(&bot, chat_id, msg_id, text, InlineKeyboardMarkup::new(rows)).await;
+    Ok(())
+}
+
+/// emby:delpick:<idx>：点序号进入两步确认。
+async fn handle_emby_delpick(
+    bot: Bot,
+    ctx: Context,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    parts: &[&str],
+) -> Result<()> {
+    let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
+        return Ok(());
+    };
+    let pending = ctx.emby_del_pending.lock().get(&chat_id).cloned();
+    let Some(pending) = pending else {
+        edit_message(&bot, chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索").await;
+        return Ok(());
+    };
+    if pending.expired() {
+        ctx.emby_del_pending.lock().remove(&chat_id);
+        edit_message(&bot, chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索").await;
+        return Ok(());
+    }
+    let Some(song) = pending.songs.get(idx).cloned() else {
+        return Ok(());
+    };
+    let artist = if song.Artists.is_empty() {
+        "未知歌手".to_string()
+    } else {
+        song.Artists.join("/")
+    };
+    let text = format!(
+        "⚠️ 确认删除「{} - {}」？\n会同时删除音乐文件，不可恢复。",
+        song.Name, artist
+    );
+    let kb = InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "✅ 确认删除",
+            format!("emby:delconf:{}", idx),
+        )],
+        vec![InlineKeyboardButton::callback("❌ 取消", "emby:delback")],
+    ]);
+    edit_message_with_kb(&bot, chat_id, msg_id, text, kb).await;
+    Ok(())
+}
+
+/// emby:delconf:<idx>：确认删除（DELETE /Items/{id} + 刷新音乐库）。
+async fn handle_emby_delconf(
+    bot: Bot,
+    ctx: Context,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    parts: &[&str],
+) -> Result<()> {
+    let Some(idx) = parts.get(2).and_then(|s| s.parse::<usize>().ok()) else {
+        return Ok(());
+    };
+    let pending = ctx.emby_del_pending.lock().get(&chat_id).cloned();
+    let Some(pending) = pending else {
+        edit_message(&bot, chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索").await;
+        return Ok(());
+    };
+    if pending.expired() {
+        ctx.emby_del_pending.lock().remove(&chat_id);
+        edit_message(&bot, chat_id, msg_id, "❌ 选择已过期，请重新 /emby 搜索").await;
+        return Ok(());
+    }
+    let Some(song) = pending.songs.get(idx).cloned() else {
+        return Ok(());
+    };
+    let Some(emby) = ctx.emby.clone() else {
+        return Ok(());
+    };
+    edit_message(&bot, chat_id, msg_id, format!("🗑 正在删除：{}", song.Name)).await;
+    match emby.delete_item(&song.Id).await {
+        Ok(()) => {
+            // 从删除候选与搜索结果里移除该歌（guard 全部临时，避免跨 await 捕获非 Send）
+            if let Some(p) = ctx.emby_del_pending.lock().get_mut(&chat_id) {
+                p.songs.retain(|x| x.Id != song.Id);
+            }
+            if let Some(p) = ctx.emby_pending.lock().get_mut(&chat_id) {
+                p.songs.retain(|x| x.Id != song.Id);
+            }
+            if let Err(e) = emby.refresh_library().await {
+                warn!(">> EMBY: refresh after delete failed: {}", e);
+            }
+            info!(">> EMBY: deleted item {} ({})", song.Name, song.Id);
+            edit_message(
+                &bot,
+                chat_id,
+                msg_id,
+                format!("🗑 已删除：{}（音乐库已刷新）", song.Name),
+            )
+            .await;
+        }
+        Err(e) => {
+            warn!(">> EMBY: delete item failed: {}", e);
+            edit_message(&bot, chat_id, msg_id, format!("❌ 删除失败：{}", e)).await;
+        }
+    }
+    Ok(())
+}
+
+/// emby:delback：返回 /emby 搜索结果面板（或取消）。
+async fn handle_emby_delback(
+    bot: Bot,
+    ctx: Context,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    _parts: &[&str],
+) -> Result<()> {
+    let pending = ctx.emby_pending.lock().get(&chat_id).cloned();
+    match pending {
+        Some(p) if !p.expired() => {
+            render_emby_results(&bot, &ctx, chat_id, Some(msg_id), None, &p.songs).await;
+        }
+        _ => {
+            edit_message(&bot, chat_id, msg_id, "已取消").await;
         }
     }
     Ok(())

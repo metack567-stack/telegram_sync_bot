@@ -1,4 +1,4 @@
-use super::{callback::render_playlist_list_ui, callback::PlaylistListMode, MyDialogue};
+use super::{callback::render_emby_results, callback::render_playlist_list_ui, callback::PlaylistListMode, MyDialogue};
 use crate::{
     context::Context,
     emby::{PendingEmby, PlaylistCtx},
@@ -240,57 +240,7 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                         .await?;
                     return Ok(());
                 }
-                let top = songs.into_iter().take(8).collect::<Vec<_>>();
-                ctx.emby_pending.lock().insert(
-                    msg.chat.id,
-                    PendingEmby {
-                        songs: top.clone(),
-                        created: Instant::now(),
-                    },
-                );
-                let mut text = format!(
-                    "🎵 Emby 音乐库「{}」相关，点下方序号发送（60 秒内有效）：\n",
-                    keyword
-                );
-                for (i, s) in top.iter().enumerate() {
-                    let artist = if s.Artists.is_empty() {
-                        "未知歌手".to_string()
-                    } else {
-                        s.Artists.join("/")
-                    };
-                    let album = s.Album.clone().unwrap_or_else(|| "未知专辑".to_string());
-                    text.push_str(&format!("{}. {} - {}《{}》\n", i + 1, s.Name, artist, album));
-                }
-                // 第一行：序号按钮横向一排，点一下直接发送该歌
-                let mut rows: Vec<Vec<InlineKeyboardButton>> = vec![top
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| {
-                        InlineKeyboardButton::callback((i + 1).to_string(), format!("emby:pick:{}", i))
-                    })
-                    .collect()];
-                // 第二行：➕ 把歌加入当前 Emby 歌单（已设置歌单时显示）
-                if let Some(p) = ctx.playlist.lock().clone() {
-                    rows.push(
-                        top.iter()
-                            .enumerate()
-                            .map(|(i, _)| {
-                                InlineKeyboardButton::callback(
-                                    format!("➕{}", i + 1),
-                                    format!("emby:add:{}", i),
-                                )
-                            })
-                            .collect(),
-                    );
-                    text.push_str(&format!("\n点 ➕ 把歌加入歌单「{}」", p.name));
-                } else {
-                    text.push_str("\n（用 /playlist <歌单名> 创建歌单后，可一键把歌加入 Emby 歌单）");
-                }
-                let mut req = bot.send_message(msg.chat.id, text);
-                req.payload_mut().reply_markup = Some(teloxide::types::ReplyMarkup::InlineKeyboard(
-                    InlineKeyboardMarkup::new(rows),
-                ));
-                req.await?;
+                render_emby_results(&bot, &ctx, msg.chat.id, None, Some(&keyword), &songs).await;
                 Ok(())
             },
         ))

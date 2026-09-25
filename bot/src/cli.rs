@@ -214,6 +214,7 @@ impl Cli {
                             }
                         },
                         emby_pending: Mutex::new(HashMap::new()),
+                        emby_del_pending: Mutex::new(HashMap::new()),
                         playlist: Mutex::new(None),
                         playlist_pending: Mutex::new(HashMap::new()),
                         playlist_list_pending: Mutex::new(HashMap::new()),
@@ -365,6 +366,7 @@ impl Cli {
                         music_pending: Mutex::new(HashMap::new()),
                         music_act: Mutex::new(HashMap::new()),
                         emby_pending: Mutex::new(HashMap::new()),
+                        emby_del_pending: Mutex::new(HashMap::new()),
                         playlist: Mutex::new(None),
                         playlist_pending: Mutex::new(HashMap::new()),
                         playlist_list_pending: Mutex::new(HashMap::new()),

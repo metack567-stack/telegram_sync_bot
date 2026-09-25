@@ -47,6 +47,8 @@ pub struct ContextInner {
     pub music_act: Mutex<HashMap<ChatId, DownloadAct>>,
     // chat_id -> emby library songs waiting for user to pick (/emby, expires in 60s)
     pub emby_pending: Mutex<HashMap<ChatId, PendingEmby>>,
+    // chat_id -> 待删除的 Emby 歌曲列表（/emby 结果点 🗑 后选择，expires in 60s）
+    pub emby_del_pending: Mutex<HashMap<ChatId, PendingEmby>>,
     // chat_id -> 歌单内歌曲列表（/playlist 📋 查看后点播，expires in 60s）
     pub playlist_pending: Mutex<HashMap<ChatId, PendingEmby>>,
     // chat_id -> Emby 歌单列表（/playlist 无参数列出后点选，expires in 60s）

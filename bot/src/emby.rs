@@ -386,4 +386,20 @@ impl EmbyClient {
         }
         Ok(())
     }
+
+    /// 删除单个媒体项（DELETE /Items/{id}，amilys 版本会连同文件系统文件一起删除，返回 204）。
+    pub async fn delete_item(&self, item_id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!("{}/Items/{}", self.base, item_id))
+            .query(&[("api_key", &self.api_key)])
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            return Err(anyhow!("emby delete item -> HTTP {status}: {text}"));
+        }
+        Ok(())
+    }
 }
