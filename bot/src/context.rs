@@ -6,7 +6,7 @@ use std::{collections::HashMap, collections::HashSet, path::PathBuf, sync::Arc};
 use teloxide::types::{ChatId, UserId};
 
 use crate::emby::{EmbyClient, PendingEmby, PlaylistCtx};
-use crate::sqm::{PendingMusic, SqmusicClient};
+use crate::sqm::{DownloadAct, PendingMusic, SqmusicClient};
 
 #[derive(Debug, Clone)]
 pub struct Context {
@@ -39,10 +39,16 @@ pub struct ContextInner {
     pub emby: Option<Arc<EmbyClient>>,
     // where sqmusic writes music files, seen from this container (env MUSIC_DIR)
     pub music_dir: Option<PathBuf>,
+    // 试听临时区（env MUSIC_TMP_DIR）：sqmusic 下载先落这里，满意后入库/收藏/删除
+    pub music_tmp_dir: Option<PathBuf>,
     // chat_id -> songs waiting for user to pick (expires in 60s)
     pub music_pending: Mutex<HashMap<ChatId, PendingMusic>>,
+    // chat_id -> 试听操作（入库/收藏/删除/加歌单），expires in 10min
+    pub music_act: Mutex<HashMap<ChatId, DownloadAct>>,
     // chat_id -> emby library songs waiting for user to pick (/emby, expires in 60s)
     pub emby_pending: Mutex<HashMap<ChatId, PendingEmby>>,
+    // chat_id -> 歌单内歌曲列表（/playlist 📋 查看后点播，expires in 60s）
+    pub playlist_pending: Mutex<HashMap<ChatId, PendingEmby>>,
     // 当前打开的 Emby 歌单（/playlist 设置，/emby 搜索可一键加入）
     pub playlist: Mutex<Option<PlaylistCtx>>,
 
@@ -65,6 +71,7 @@ impl fmt::Display for Context {
             .field("sqmusic", &self.sqmusic.as_ref().map(|_| "enabled"))
             .field("emby", &self.emby.as_ref().map(|_| "enabled"))
             .field("music_dir", &self.music_dir)
+            .field("music_tmp_dir", &self.music_tmp_dir)
             .finish()
     }
 }

@@ -44,6 +44,8 @@ enum Command {
     Emby(String),
     #[command(description = "Create/open an Emby playlist, e.g. /playlist 我的歌单")]
     Playlist(String),
+    #[command(rename = "favs", description = "List your favorited music")]
+    Favs,
 }
 
 pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
@@ -191,30 +193,16 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                     ));
                 }
                 // 第一行：序号按钮横向一排，点一下直接进入该歌的音质选择
-                let mut rows: Vec<Vec<InlineKeyboardButton>> = vec![top
+                let rows: Vec<Vec<InlineKeyboardButton>> = vec![top
                     .iter()
                     .enumerate()
                     .map(|(i, _)| {
                         InlineKeyboardButton::callback((i + 1).to_string(), format!("music:pick:{}", i))
                     })
                     .collect()];
-                // 第二行：➕ 把歌加入当前 Emby 歌单（已设置歌单时显示）
-                if let Some(p) = ctx.playlist.lock().clone() {
-                    rows.push(
-                        top.iter()
-                            .enumerate()
-                            .map(|(i, _)| {
-                                InlineKeyboardButton::callback(
-                                    format!("➕{}", i + 1),
-                                    format!("music:add:{}", i),
-                                )
-                            })
-                            .collect(),
-                    );
-                    text.push_str(&format!("\n点 ➕ 把歌加入歌单「{}」", p.name));
-                } else {
-                    text.push_str("\n（用 /playlist <歌单名> 创建歌单后，可一键把歌加入 Emby 歌单）");
-                }
+                text.push_str(
+                    "\n下载试听后点 📥 入库，即可在 Emby 播放/加入歌单（先 /playlist <歌单名> 创建）",
+                );
                 let mut req = bot.send_message(msg.chat.id, text);
                 req.payload_mut().reply_markup = Some(teloxide::types::ReplyMarkup::InlineKeyboard(
                     InlineKeyboardMarkup::new(rows),
@@ -318,14 +306,19 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                     let cur = ctx.playlist.lock().clone();
                     match cur {
                         Some(p) => {
-                            bot.send_message(
+                            let kb = InlineKeyboardMarkup::new(vec![vec![
+                                InlineKeyboardButton::callback("📋 查看歌单歌曲", "playlist:show"),
+                            ]]);
+                            let mut req = bot.send_message(
                                 msg.chat.id,
                                 format!(
-                                    "当前歌单：「{}」（Emby Id {}）。用 /playlist <歌单名> 切换或新建",
+                                    "当前歌单：「{}」（Emby Id {}）。\n点下方查看歌单内歌曲，或 /playlist <歌单名> 切换/新建",
                                     p.name, p.id
                                 ),
-                            )
-                            .await?;
+                            );
+                            req.payload_mut().reply_markup =
+                                Some(teloxide::types::ReplyMarkup::InlineKeyboard(kb));
+                            req.await?;
                         }
                         None => {
                             bot.send_message(
@@ -357,6 +350,50 @@ pub fn cmd_handler() -> UpdateHandler<anyhow::Error> {
                         bot.send_message(msg.chat.id, format!("❌ 歌单操作失败：{}", e)).await?;
                     }
                 }
+                Ok(())
+            },
+        ))
+        .branch(case![Command::Favs].endpoint(
+            async |bot: Bot, msg: Message, db: MyStorage| {
+                let favs = db.list_favorites(msg.chat.id).await?;
+                if favs.is_empty() {
+                    bot.send_message(
+                        msg.chat.id,
+                        "🎵 还没有收藏。用 /music 下载试听后点 ❤️ 收藏",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                let mut text = format!("🎵 我的收藏（{}），点序号播放：\n", favs.len());
+                for (i, f) in favs.iter().enumerate() {
+                    let album = if f.album.is_empty() {
+                        String::new()
+                    } else {
+                        format!("《{}》", f.album)
+                    };
+                    text.push_str(&format!(
+                        "{}. {} - {}{}（收藏于 {}）\n",
+                        i + 1, f.name, f.artist, album, f.created_at
+                    ));
+                }
+                let buttons: Vec<InlineKeyboardButton> = favs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        InlineKeyboardButton::callback(
+                            (i + 1).to_string(),
+                            format!("favs:play:{}", i),
+                        )
+                    })
+                    .collect();
+                let rows: Vec<Vec<InlineKeyboardButton>> =
+                    buttons.chunks(8).map(|c| c.to_vec()).collect();
+                let mut req = bot.send_message(msg.chat.id, text);
+                req.payload_mut().reply_markup =
+                    Some(teloxide::types::ReplyMarkup::InlineKeyboard(
+                        InlineKeyboardMarkup::new(rows),
+                    ));
+                req.await?;
                 Ok(())
             },
         ))

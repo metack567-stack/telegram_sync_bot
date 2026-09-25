@@ -58,6 +58,8 @@ reqwest_v11 = { package = "reqwest", version = "0.11.10", features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# favorites 表 created_at 用 chrono NaiveDateTime（sea-orm with-chrono 已启用）
+chrono = { version = "0.4", features = ["serde"] }
 
 [features]
 default = []

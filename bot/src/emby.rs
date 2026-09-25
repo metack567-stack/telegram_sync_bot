@@ -289,4 +289,35 @@ impl EmbyClient {
         }
         Ok(())
     }
+
+    /// 列出歌单内的歌曲（GET /Playlists/{id}/Items）。
+    pub async fn playlist_items(&self, playlist_id: &str) -> Result<Vec<EmbySong>> {
+        let resp = self
+            .http
+            .get(format!("{}/Playlists/{}/Items", self.base, playlist_id))
+            .query(&[
+                ("Fields", "Path,Artists,Album"),
+                ("Limit", "50"),
+                ("api_key", &self.api_key),
+            ])
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("emby playlist items -> HTTP {status}: {text}"));
+        }
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("emby playlist items bad json: {e}: {text}"))?;
+        let items = json
+            .get("Items")
+            .and_then(|i| i.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let songs: Vec<EmbySong> = items
+            .into_iter()
+            .filter_map(|it| serde_json::from_value(it).ok())
+            .collect();
+        Ok(songs)
+    }
 }

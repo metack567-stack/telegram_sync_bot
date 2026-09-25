@@ -6,18 +6,22 @@ use super::{
 use crate::{
     context::Context,
     emby::EmbyClient,
-    sqm::{MusicRecord, SqmusicClient},
+    sqm::{DownloadAct, MusicRecord, SqmusicClient},
     storage::{ChatState, FileState, MyStorage, TransportState},
 };
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use teloxide::{
     Bot,
     dispatching::{UpdateFilterExt as _, UpdateHandler},
     prelude::Requester as _,
     requests::HasPayload as _,
-    types::{ChatId, InputFile, MediaKind, MediaText, Message, MessageKind, Update},
+    types::{
+        ChatId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MediaKind, MediaText,
+        Message, MessageKind, Update,
+    },
 };
 use tracing::{info, instrument, warn};
 
@@ -255,17 +259,23 @@ async fn handle(bot: Bot, dialogue: MyDialogue, msg: Message, storage: MyStorage
     Ok(())
 }
 
-/// sqmusic 下载流程：提交下载 -> 等待任务完成 -> 在音乐目录找文件 -> 发回 Telegram。
+/// sqmusic 下载流程：提交下载 -> 等待任务完成 -> 在（临时）目录找文件 -> 发回 Telegram。
 /// 首选源失败时自动用歌名在 qq/mg 源重试一次；全部失败时通知用户。
+/// 配置了 MUSIC_TMP_DIR 时走"临时区试听"流程（下载不直接进音乐库）；
+/// 未配置时保持旧行为（下载进音乐库 + 自动刷新 Emby）。
 pub(crate) async fn download_and_send(
     bot: Bot,
     sqm: Arc<SqmusicClient>,
     emby: Option<Arc<EmbyClient>>,
-    music_dir: PathBuf,
+    ctx: Context,
     chat_id: ChatId,
     song: MusicRecord,
     br: String,
 ) -> Result<()> {
+    let Some(music_dir) = ctx.music_dir.clone() else {
+        bot.send_message(chat_id, "❌ 未配置音乐目录（MUSIC_DIR）").await?;
+        return Ok(());
+    };
     let mut plugs = vec![song.plugName.clone()];
     for p in ["qq", "mg"] {
         if !plugs.iter().any(|x| x == p) {
@@ -297,7 +307,7 @@ pub(crate) async fn download_and_send(
         if idx > 0 {
             info!(">> SQMUSIC: retry via {} source", plug);
         }
-        match try_download_and_send(&bot, &sqm, emby.clone(), &music_dir, chat_id, &target, &br).await {
+        match try_download_and_send(&bot, &sqm, emby.clone(), &ctx, &music_dir, chat_id, &target, &br).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 warn!(">> SQMUSIC: {} attempt failed: {}", plug, e);
@@ -330,11 +340,14 @@ async fn send_audio_with_title(
 }
 
 /// 单源下载尝试：Emby 预查 -> 本地预查（已有则直接返回，不重复下载）-> 提交下载
-/// -> 找文件 -> 发回音频 + 完成消息。
+/// -> 找文件 -> 发回音频。
+/// 有临时区（MUSIC_TMP_DIR）时：下载落临时区，发回试听 + 操作面板（入库/收藏/删除）；
+/// 无临时区时：保持旧行为（下载进音乐库 + 自动刷新 Emby + 完成消息）。
 async fn try_download_and_send(
     bot: &Bot,
     sqm: &Arc<SqmusicClient>,
     emby: Option<Arc<EmbyClient>>,
+    ctx: &Context,
     music_dir: &PathBuf,
     chat_id: ChatId,
     song: &MusicRecord,
@@ -409,11 +422,23 @@ async fn try_download_and_send(
         }
         return Ok(());
     }
+    // 临时区预查：这首歌正在试听区（上次下载未入库），不重复下载，直接再发一次试听 + 面板
+    if let Some(tmp) = &ctx.music_tmp_dir {
+        if let Some(found) = crate::sqm::find_in_library(tmp, song, prefer_ext) {
+            info!(">> SQMUSIC: tmp hit {}", found.path.display());
+            let act = make_act(tmp, &found.path, song, None);
+            ctx.music_act.lock().insert(chat_id, act.clone());
+            let (text, kb) = trial_panel(&act, br, found.format_ok);
+            let mut req = bot.send_message(chat_id, text);
+            req.payload_mut().reply_markup =
+                Some(teloxide::types::ReplyMarkup::InlineKeyboard(kb));
+            req.await?;
+            return Ok(());
+        }
+    }
     // 未命中：正常下载
     sqm.download_song(song, br).await?;
     let task = sqm.wait_task(&song.id, 90).await?;
-    let found = crate::sqm::find_latest_audio(music_dir, &task, prefer_ext).await?;
-    let file = found.path;
     let title = task
         .downloadMusicname
         .clone()
@@ -429,6 +454,24 @@ async fn try_download_and_send(
                 song.artistName.join("/")
             }
         });
+    // 有临时区：在临时区找文件 -> 发回试听 + 操作面板（不刷新 Emby，未入库）
+    if let Some(tmp) = &ctx.music_tmp_dir {
+        let found = crate::sqm::find_latest_audio(tmp, &task, prefer_ext).await?;
+        let file = found.path;
+        let fname = send_audio_with_title(bot, chat_id, &file, title, performer).await?;
+        let act = make_act(tmp, &file, song, task.downloadAlbumname.clone());
+        ctx.music_act.lock().insert(chat_id, act.clone());
+        info!(">> SQMUSIC: trial downloaded {} (tmp)", fname);
+        let (text, kb) = trial_panel(&act, br, found.format_ok);
+        let mut req = bot.send_message(chat_id, text);
+        req.payload_mut().reply_markup =
+            Some(teloxide::types::ReplyMarkup::InlineKeyboard(kb));
+        req.await?;
+        return Ok(());
+    }
+    // 无临时区（旧行为）：下载进音乐库 + 刷新 Emby + 完成消息
+    let found = crate::sqm::find_latest_audio(music_dir, &task, prefer_ext).await?;
+    let file = found.path;
     let fname = send_audio_with_title(bot, chat_id, &file, title, performer).await?;
     // 新歌已写入音乐库，触发 Emby 扫描让新歌立即可见（失败不阻断）
     if let Some(emby) = emby.as_ref() {
@@ -456,4 +499,53 @@ async fn try_download_and_send(
         .await?;
     }
     Ok(())
+}
+
+/// 由临时区里的文件构造试听操作状态（DownloadAct）。
+fn make_act(
+    tmp_dir: &PathBuf,
+    file: &PathBuf,
+    song: &MusicRecord,
+    album: Option<String>,
+) -> DownloadAct {
+    let artist = if song.artistName.is_empty() {
+        "未知歌手".to_string()
+    } else {
+        song.artistName.join("/")
+    };
+    let rel_path = file
+        .strip_prefix(tmp_dir)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| {
+            PathBuf::from(file.file_name().unwrap_or_default().to_string_lossy().to_string())
+        });
+    DownloadAct {
+        tmp_path: file.clone(),
+        rel_path,
+        name: song.name.clone(),
+        artist,
+        album: album.or_else(|| song.albumName.clone()),
+        created: Instant::now(),
+        kept: false,
+    }
+}
+
+/// 试听完成后的操作面板文案 + 键盘（入库/收藏/删除）。
+fn trial_panel(act: &DownloadAct, br: &str, format_ok: bool) -> (String, InlineKeyboardMarkup) {
+    let mut text = format!(
+        "✅ 已下载试听：{} - {}〔{}〕\n（临时区试听中，未入库；满意可入库，不满意可删除）",
+        act.name,
+        act.artist,
+        br.replace('_', " ")
+    );
+    if !format_ok {
+        let want = crate::sqm::ext_from_br(br).unwrap_or("该格式");
+        text.push_str(&format!("\n⚠️ 未找到 {} 格式，已返回其它格式", want));
+    }
+    let kb = InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("📥 入库", "music:act:keep"),
+        InlineKeyboardButton::callback("❤️ 收藏", "music:act:fav"),
+        InlineKeyboardButton::callback("🗑 删除", "music:act:del"),
+    ]]);
+    (text, kb)
 }

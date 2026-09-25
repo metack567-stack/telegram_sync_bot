@@ -41,7 +41,6 @@ pub struct TaskRecord {
     pub downloadFile: Option<String>,
     pub downloadMusicname: Option<String>,
     pub downloadArtistname: Option<String>,
-    #[allow(dead_code)]
     pub downloadAlbumname: Option<String>,
     #[allow(dead_code)]
     pub downloadBrType: Option<String>,
@@ -61,6 +60,28 @@ pub struct PendingMusic {
 impl PendingMusic {
     pub fn expired(&self) -> bool {
         self.created.elapsed() > Duration::from_secs(60)
+    }
+}
+
+/// 一次"下载试听"的操作状态：文件在临时区，等待用户 入库/收藏/删除。
+/// 有效期 10 分钟（听完歌再决定）；超时后按钮失效，文件留给后台定时清理。
+#[derive(Debug, Clone)]
+pub struct DownloadAct {
+    /// 临时区里的文件绝对路径（试听/删除用）
+    pub tmp_path: PathBuf,
+    /// 相对音乐库的路径（保留 歌手/专辑 子目录结构），入库时 copy 到 MUSIC_DIR 下
+    pub rel_path: PathBuf,
+    pub name: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub created: Instant,
+    /// 是否已入库（入库后按钮变为 ➕ 加入歌单）
+    pub kept: bool,
+}
+
+impl DownloadAct {
+    pub fn expired(&self) -> bool {
+        self.created.elapsed() > Duration::from_secs(600)
     }
 }
 
@@ -560,4 +581,64 @@ fn strip_audio_ext(name: &str) -> &str {
 fn is_audio_ext(name: &str) -> bool {
     const EXTS: [&str; 8] = ["mp3", "flac", "m4a", "ape", "wav", "ogg", "aac", "opus"];
     EXTS.iter().any(|e| name.ends_with(e))
+}
+
+/// 清理临时试听区：删除超过 `older_than_secs` 未入库的文件；若剩余仍超过 `keep`
+/// 个，再删除最旧的。返回删除数量。目录不存在时直接返回 0（不视为错误）。
+pub async fn cleanup_tmp_dir(dir: &PathBuf, older_than_secs: u64, keep: usize) -> Result<u32> {
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut files: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for entry in walkdir::WalkDir::new(dir)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if !is_audio_ext(&name) {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata()
+            && let Ok(t) = meta.modified()
+        {
+            files.push((t, entry.into_path()));
+        }
+    }
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(older_than_secs))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut removed = 0u32;
+    let mut keep_list: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for (t, p) in files {
+        if t < cutoff {
+            match tokio::fs::remove_file(&p).await {
+                Ok(_) => {
+                    removed += 1;
+                    info!(">> CLEANER: tmp music removed {}", p.display());
+                }
+                Err(e) => warn!(">> CLEANER: tmp music remove failed {}: {}", p.display(), e),
+            }
+        } else {
+            keep_list.push((t, p));
+        }
+    }
+    if keep_list.len() > keep {
+        // 按修改时间由旧到新排序，超出 keep 的删掉
+        keep_list.sort_by(|a, b| a.0.cmp(&b.0));
+        let overflow = keep_list.len().saturating_sub(keep);
+        for (_, p) in keep_list.into_iter().take(overflow) {
+            match tokio::fs::remove_file(&p).await {
+                Ok(_) => {
+                    removed += 1;
+                    info!(">> CLEANER: tmp music evicted {}", p.display());
+                }
+                Err(e) => warn!(">> CLEANER: tmp music evict failed {}: {}", p.display(), e),
+            }
+        }
+    }
+    Ok(removed)
 }

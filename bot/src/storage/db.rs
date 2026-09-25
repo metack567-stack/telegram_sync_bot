@@ -1,8 +1,9 @@
-use super::entity::{chat_state, file_handle, file_state};
+use super::entity::{chat_state, favorite, file_handle, file_state};
 use super::state::*;
 use crate::migration::{Migrator, MigratorTrait};
 use anyhow::Result;
 use sea_orm::ActiveValue::*;
+use sea_orm::QueryOrder;
 use sea_orm::TransactionTrait as _;
 use sea_orm::prelude::*;
 use sea_orm::sea_query;
@@ -335,4 +336,83 @@ impl Db {
         .await?;
         Ok(())
     }
+
+    // ----- favorites（音乐收藏，与文件传输无关） -----
+
+    /// 新增收藏；已存在（同 chat+歌名+歌手）时返回 false，不重复插入。
+    pub(super) async fn add_favorite(
+        &self,
+        chat_id: i64,
+        name: &str,
+        artist: &str,
+        album: &str,
+    ) -> Result<bool> {
+        let exists = favorite::Entity::find()
+            .filter(favorite::Column::ChatId.eq(chat_id))
+            .filter(favorite::Column::Name.eq(name))
+            .filter(favorite::Column::Artist.eq(artist))
+            .count(&self.db)
+            .await?;
+        if exists > 0 {
+            return Ok(false);
+        }
+        favorite::Entity::insert(favorite::ActiveModel {
+            chat_id: Set(chat_id),
+            name: Set(name.to_string()),
+            artist: Set(artist.to_string()),
+            album: Set(album.to_string()),
+            ..Default::default()
+        })
+        .exec(&self.db)
+        .await?;
+        info!(">> DB: favorite added chat {} {} - {}", chat_id, name, artist);
+        Ok(true)
+    }
+
+    /// 取消收藏；存在并删除返回 true，不存在返回 false。
+    pub(super) async fn remove_favorite(
+        &self,
+        chat_id: i64,
+        name: &str,
+        artist: &str,
+    ) -> Result<bool> {
+        let res = favorite::Entity::delete_many()
+            .filter(favorite::Column::ChatId.eq(chat_id))
+            .filter(favorite::Column::Name.eq(name))
+            .filter(favorite::Column::Artist.eq(artist))
+            .exec(&self.db)
+            .await?;
+        let removed = res.rows_affected > 0;
+        if removed {
+            info!(">> DB: favorite removed chat {} {} - {}", chat_id, name, artist);
+        }
+        Ok(removed)
+    }
+
+    /// 按收藏时间倒序列出某 chat 的收藏。
+    pub(super) async fn list_favorites(&self, chat_id: i64) -> Result<Vec<FavoriteRow>> {
+        let rows = favorite::Entity::find()
+            .filter(favorite::Column::ChatId.eq(chat_id))
+            .order_by_desc(favorite::Column::CreatedAt)
+            .all(&self.db)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| FavoriteRow {
+                name: r.name,
+                artist: r.artist,
+                album: r.album,
+                created_at: r.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            })
+            .collect())
+    }
+}
+
+/// 一条音乐收藏记录（不包含文件句柄，收藏的是"歌名/歌手/专辑"元数据）。
+#[derive(Debug, Clone)]
+pub struct FavoriteRow {
+    pub name: String,
+    pub artist: String,
+    pub album: String,
+    pub created_at: String,
 }

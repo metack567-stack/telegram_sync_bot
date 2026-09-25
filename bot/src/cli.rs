@@ -186,6 +186,16 @@ impl Cli {
                             }
                             dir
                         },
+                        music_tmp_dir: {
+                            let dir = std::env::var("MUSIC_TMP_DIR")
+                                .map(std::path::PathBuf::from)
+                                .ok()
+                                .filter(|p| !p.as_os_str().is_empty());
+                            if let Some(dir) = &dir {
+                                info!(">> INIT: music tmp dir: {}", dir.display());
+                            }
+                            dir
+                        },
                         emby: {
                             match (
                                 std::env::var("EMBY_URL"),
@@ -205,7 +215,9 @@ impl Cli {
                         },
                         emby_pending: Mutex::new(HashMap::new()),
                         playlist: Mutex::new(None),
+                        playlist_pending: Mutex::new(HashMap::new()),
                         music_pending: Mutex::new(HashMap::new()),
+                        music_act: Mutex::new(HashMap::new()),
                         fav_score_limit,
                         dislike_score_limit,
                         hard_link: AtomicBool::new(true), // ensure try hard link once
@@ -235,6 +247,7 @@ impl Cli {
                         BotCommand::new("music", "Search and download music via sqmusic, e.g. /music 晴天"),
                         BotCommand::new("emby", "Search music on Emby library, e.g. /emby 晴天"),
                         BotCommand::new("playlist", "Create/open an Emby playlist, e.g. /playlist 我的歌单"),
+                        BotCommand::new("favs", "List your favorited music"),
                     ];
                     match bot.set_my_commands(commands).await {
                         Ok(_) => info!(">> INIT: command menu registered"),
@@ -276,6 +289,40 @@ impl Cli {
                         }
                     });
                 }
+                // background music-tmp cleaner: remove trial-download files in the
+                // temporary dir that are older than MUSIC_TMP_RETENTION_SECS (default
+                // 86400 = 1 day), keeping at most MUSIC_TMP_KEEP newest files; checked
+                // every hour. Tracks state only via filesystem, so restart-safe.
+                if let Some(tmp_dir) = context.music_tmp_dir.clone() {
+                    let retention = std::env::var("MUSIC_TMP_RETENTION_SECS")
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(86_400);
+                    let keep = std::env::var("MUSIC_TMP_KEEP")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(50);
+                    info!(
+                        ">> INIT: music tmp cleaner enabled for {}, retention {}s, keep {}",
+                        tmp_dir.display(),
+                        retention,
+                        keep
+                    );
+                    tokio::spawn(async move {
+                        loop {
+                            match crate::sqm::cleanup_tmp_dir(&tmp_dir, retention, keep).await {
+                                Ok(n) if n > 0 => {
+                                    info!(">> TMP-CLEANER: removed {} stale trial file(s)", n)
+                                }
+                                Ok(_) => {}
+                                Err(e) => error!(">> TMP-CLEANER: {}", e),
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                        }
+                    });
+                } else {
+                    info!(">> INIT: music tmp cleaner disabled (MUSIC_TMP_DIR unset)");
+                }
                 let mut dispatcher = Dispatcher::builder(bot, handler())
                     .dependencies(dptree::deps![InMemStorage::<()>::new(), context, storage])
                     .build();
@@ -313,9 +360,12 @@ impl Cli {
                         sqmusic: None,
                         emby: None,
                         music_dir: None,
+                        music_tmp_dir: None,
                         music_pending: Mutex::new(HashMap::new()),
+                        music_act: Mutex::new(HashMap::new()),
                         emby_pending: Mutex::new(HashMap::new()),
                         playlist: Mutex::new(None),
+                        playlist_pending: Mutex::new(HashMap::new()),
                         hard_link: AtomicBool::new(true), // ensure try hard link once
                     }),
                 };

@@ -3,5 +3,6 @@
 pub mod prelude;
 
 pub mod chat_state;
+pub mod favorite;
 pub mod file_handle;
 pub mod file_state;

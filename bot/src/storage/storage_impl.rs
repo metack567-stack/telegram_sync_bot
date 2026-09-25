@@ -1,6 +1,6 @@
 use super::transport::TransportHandle;
 use super::{FileId, FileName};
-use super::{db::Db, state::*, transport::Downloader};
+use super::{db::Db, db::FavoriteRow, state::*, transport::Downloader};
 use crate::context::Context;
 use anyhow::{Result, anyhow};
 use std::path::PathBuf;
@@ -492,5 +492,37 @@ impl MyStorage {
             info!(">> CLEANER: cleaned {} expired trash file(s)", removed);
         }
         Ok(removed)
+    }
+}
+
+impl MyStorage {
+    // ----- 音乐收藏 -----
+
+    /// 新增收藏（同 chat+歌名+歌手 已存在时返回 false）。
+    pub async fn add_favorite(
+        &self,
+        chat_id: ChatId,
+        name: &str,
+        artist: &str,
+        album: &str,
+    ) -> Result<bool> {
+        self.db
+            .add_favorite(chat_id.0, name, artist, album)
+            .await
+    }
+
+    /// 取消收藏，返回是否真的删除了记录。
+    pub async fn remove_favorite(
+        &self,
+        chat_id: ChatId,
+        name: &str,
+        artist: &str,
+    ) -> Result<bool> {
+        self.db.remove_favorite(chat_id.0, name, artist).await
+    }
+
+    /// 列出某 chat 的收藏（按收藏时间倒序）。
+    pub async fn list_favorites(&self, chat_id: ChatId) -> Result<Vec<FavoriteRow>> {
+        self.db.list_favorites(chat_id.0).await
     }
 }

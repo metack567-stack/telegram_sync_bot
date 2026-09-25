@@ -12,9 +12,10 @@
 - **回收站自动清理**：过期文件（默认 7 天）每小时自动清除
 - **断点恢复**：重启后自动恢复未完成的下载任务
 - **硬链接归档**：文件以硬链接方式组织，不重复占用磁盘空间
-- **sqmusic 音乐联动**：`/music <歌名>` 搜索并下载歌曲（对接本机 sqmusic「简单音乐」，自动落盘到音乐库并回传音频文件）
-- **Emby 音乐库联动**：下载前预查音乐库避免重复下载；`/emby <歌名>` 直接查库点播（把库里的歌发回 Telegram）；下载完成后自动触发 Emby 库刷新
-- **Emby 歌单**：`/playlist <歌单名>` 创建/打开 Emby 播放列表，`/emby` 搜索结果点 ➕ 一键把歌加入歌单，Emby/飞牛音乐里直接可播
+- **sqmusic 音乐联动**：`/music <歌名>` 搜索并下载歌曲（对接本机 sqmusic「简单音乐」）。**试听先行**：下载落到临时区，先回传音频试听，满意后一键 **📥入库**（移入音乐库 + 自动刷新 Emby）/ **❤️收藏** / **🗑删除**，不满意删临时文件即可，不污染音乐库
+- **Emby 音乐库联动**：下载前预查音乐库避免重复下载；`/emby <歌名>` 直接查库点播（把库里的歌发回 Telegram）；下载完成自动触发 Emby 库刷新
+- **Emby 歌单**：`/playlist <歌单名>` 创建/打开 Emby 播放列表，`/emby` 搜索结果点 ➕ 一键把歌加入歌单；`/playlist` 可查看歌单内歌曲并点序号直接播放
+- **音乐收藏**：`/favs` 查看收藏列表，点序号播放、随时取消收藏（SQLite 持久化，跨重启保留）
 - **多态部署**：支持 Docker Compose / Docker / Podman / Kubernetes / 原生 Systemd
 
 ## 工作原理
@@ -92,13 +93,16 @@ data/                          # 数据目录（-d 指定）
 | `SQMUSIC_URL` | * | sqmusic 后端地址（启用 `/music` 联动），如 `http://sqmusic_main:8099` | 不设置（功能关闭） |
 | `SQMUSIC_USER` | * | sqmusic 登录用户名 | `admin` |
 | `SQMUSIC_PASS` | * | sqmusic 登录密码 | `admin` |
-| `MUSIC_DIR` | * | sqmusic 音乐库目录在 bot 容器内的挂载路径（如 `/music`），用于下载后回传文件 | 不设置（功能关闭） |
+| `MUSIC_DIR` | * | sqmusic 音乐库目录在 bot 容器内的挂载路径（如 `/music`），用于入库与回传文件 | 不设置（功能关闭） |
+| `MUSIC_TMP_DIR` | - | 临时试听区目录（如 `/music-tmp`）。设置后 `/music` 下载先落临时区试听（不入库），点 📥 入库才移入音乐库；后台定时清理过期文件 | 不设置（下载直接进音乐库，旧行为） |
+| `MUSIC_TMP_RETENTION_SECS` | - | 临时试听区文件保留秒数（超时自动清理，每小时检查） | 86400（1 天） |
+| `MUSIC_TMP_KEEP` | - | 临时试听区最少保留的文件数（超过则删最旧） | 50 |
 | `EMBY_URL` | * | Emby 服务地址（启用 `/music` 下载前音乐库预查），如 `http://192.168.8.219:9096/emby` | 不设置（功能关闭） |
 | `EMBY_API_KEY` | * | Emby API 密钥（只读查询用） | 不设置（功能关闭） |
 
 `*` 使用本地服务器模式（无 20MB 限制）时需要。API ID / Hash 在 [Telegram 官网](https://core.telegram.org/obtaining_api_id) 申请（申请报错时可尝试 `cloudflare warp` 代理）。
 
-> sqmusic 联动（`/music`）：需同时设置 `SQMUSIC_URL` 与 `MUSIC_DIR`。用法：向机器人发送 `/music 晴天 周杰伦`，按提示回复数字选择歌曲，机器人会调 sqmusic 搜索下载（默认酷我 `kw` 源，免费曲目直接可下），下载完成后把音频文件发回并把歌曲同步到音乐库（Emby 兼容目录 `音乐库/歌手/专辑/`）。 下载前会先查 Emby 音乐库（配置 `EMBY_URL`/`EMBY_API_KEY` 时）与本地音乐目录：已有该歌则直接回传现有文件，不重复下载；Emby 查询失败时自动回退到本地目录预查。 下载完成新歌后会自动触发 Emby 音乐库扫描（无需手动刷新）。另有 `/emby <歌名>` 命令：直接搜索 Emby 音乐库，点序号即可把库里的音频文件发回 Telegram（远程点播，不经过下载）。 用 `/playlist <歌单名>` 创建/打开 Emby 播放列表后，`/emby` 搜索结果会多出一行 ➕ 按钮，点一下即可把对应歌曲加入该歌单，在 Emby / 飞牛音乐里可以直接播放。
+> sqmusic 联动（`/music`）：需同时设置 `SQMUSIC_URL` 与 `MUSIC_DIR`。用法：向机器人发送 `/music 晴天 周杰伦`，点下方序号选歌（横向一排），再点音质按钮（可点 ⚙️ 自动），机器人调 sqmusic 搜索下载。**设置 `MUSIC_TMP_DIR` 后走"试听先行"流程**：下载落临时区不入库，音频回传试听 + 操作面板 `[📥 入库] [❤️ 收藏] [🗑 删除]`——入库 = 文件移入音乐库并自动触发 Emby 刷新；收藏 = 写入 SQLite（试听文件保留）；删除 = 删临时文件；10 分钟内不操作由后台任务定时清理（`MUSIC_TMP_RETENTION_SECS`/`MUSIC_TMP_KEEP`）。下载前会先查 Emby 音乐库（配置 `EMBY_URL`/`EMBY_API_KEY` 时）与本地音乐目录：已有该歌则直接回传现有文件，不重复下载。另有 `/emby <歌名>` 命令：直接搜索 Emby 音乐库点播（不经过下载）；`/playlist <歌单名>` 创建/打开 Emby 歌单，`/playlist` 查看歌单内歌曲点序号播放，`/emby` 搜索结果点 ➕ 加入歌单；`/favs` 查看收藏列表，点序号播放、可取消收藏。
 
 ## 部署
 
@@ -157,12 +161,14 @@ SQMUSIC_URL=http://sqmusic_main:8099
 SQMUSIC_USER=admin
 SQMUSIC_PASS=admin
 MUSIC_DIR=/music
+# 临时试听区（可选，推荐）：下载先落临时区，满意后点 📥 入库
+MUSIC_TMP_DIR=/music-tmp
 # 启用下载前 Emby 音乐库预查（可选）
 EMBY_URL=http://192.168.8.219:9096/emby
 EMBY_API_KEY=your_emby_api_key
 ```
 
-同时给 bot 服务追加音乐库挂载：`- /vol1/1000/音频/音乐:/music:ro`（路径按你的 sqmusic 实际音乐目录调整）。
+同时给 bot 服务追加音乐库挂载：`- /vol1/1000/音频/音乐:/music:rw`、`- /vol1/1000/Docker/telegram-sync-bot/music-tmp:/music-tmp`（路径按你的实际目录调整；sqmusic 的下载目录需同样指向 `/music-tmp`）。
 
 启动 / 更新：
 
